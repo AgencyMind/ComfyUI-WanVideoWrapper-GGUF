@@ -1368,8 +1368,15 @@ class WanVideoModelLoaderGGUF:
         patch_emb_shape = sd["patch_embedding.weight"].shape
         print(f"DEBUG: patch_embedding.weight shape: {patch_emb_shape}")
         
-        dim = patch_emb_shape[0]
-        in_channels = patch_emb_shape[1]
+        # For GGUF models, patch_embedding may have 5D shape [out_ch, in_ch, d, h, w]
+        # The actual model dimension is typically the last dimension (feature dimension)
+        if len(patch_emb_shape) == 5:
+            dim = patch_emb_shape[-1]  # Use last dimension for 5D tensors
+            in_channels = patch_emb_shape[1] * patch_emb_shape[2] * patch_emb_shape[3]  # in_ch * d * h
+        else:
+            dim = patch_emb_shape[0]  # Standard behavior for 4D tensors
+            in_channels = patch_emb_shape[1]
+        
         print(f"INFO: Detected model dim: {dim}, in_channels: {in_channels}")
         
         ffn_bias_shape = sd["blocks.0.ffn.0.bias"].shape
