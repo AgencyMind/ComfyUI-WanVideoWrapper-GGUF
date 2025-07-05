@@ -1919,6 +1919,50 @@ class LoadWanVideoT5TextEncoderGGUF:
                     new_key = key
                 converted_sd[new_key] = value
             sd = converted_sd
+        
+        # Convert GGUF T5 format (enc.blk.) to expected format
+        elif any(key.startswith("enc.blk.") for key in sd.keys()):
+            print("Converting GGUF T5 text encoder model to the expected format...")
+            converted_sd = {}
+            
+            for key, value in sd.items():
+                if key.startswith('enc.blk.'):
+                    # Extract block number from enc.blk.X pattern
+                    parts = key.split('.')
+                    block_num = parts[2]
+                    
+                    # Map GGUF attention components
+                    if key.endswith('.attn_k.weight'):
+                        new_key = f"blocks.{block_num}.attn.k.weight"
+                    elif key.endswith('.attn_q.weight'):
+                        new_key = f"blocks.{block_num}.attn.q.weight"
+                    elif key.endswith('.attn_v.weight'):
+                        new_key = f"blocks.{block_num}.attn.v.weight"
+                    elif key.endswith('.attn_o.weight'):
+                        new_key = f"blocks.{block_num}.attn.o.weight"
+                    elif key.endswith('.attn_rel_b.weight'):
+                        new_key = f"blocks.{block_num}.pos_embedding.embedding.weight"
+                    elif key.endswith('.attn_norm.weight'):
+                        new_key = f"blocks.{block_num}.norm1.weight"
+                    # Map GGUF feed-forward components
+                    elif key.endswith('.ffn_gate.weight'):
+                        new_key = f"blocks.{block_num}.ffn.gate.0.weight"
+                    elif key.endswith('.ffn_up.weight'):
+                        new_key = f"blocks.{block_num}.ffn.fc1.weight"
+                    elif key.endswith('.ffn_down.weight'):
+                        new_key = f"blocks.{block_num}.ffn.fc2.weight"
+                    elif key.endswith('.ffn_norm.weight'):
+                        new_key = f"blocks.{block_num}.norm2.weight"
+                    else:
+                        new_key = key
+                elif key == "output_norm.weight":
+                    new_key = "norm.weight"
+                elif key == "token_embd.weight":
+                    new_key = "token_embedding.weight"
+                else:
+                    new_key = key
+                converted_sd[new_key] = value
+            sd = converted_sd
 
         # Initialize T5 text encoder with potential GGUF quantization
         T5_text_encoder = T5EncoderModel(
