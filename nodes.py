@@ -1275,29 +1275,36 @@ class WanVideoModelLoaderGGUF:
         assert not (vram_management_args is not None and block_swap_args is not None), "Can't use both block_swap_args and vram_management_args at the same time"
         
         # Setup GGUF custom operations with quantization options
-        from .ComfyUI_GGUF.ops import GGMLOps
+        try:
+            from comfy_extras.nodes_gguf import GGMLOps
+            custom_ops = GGMLOps()
+        except ImportError:
+            # Fallback to standard ops if GGUF not available
+            custom_ops = comfy.ops.disable_weight_init
         
-        custom_ops = GGMLOps()
-        
-        if dequant_dtype in ("default", None):
-            custom_ops.Linear.dequant_dtype = None
-        elif dequant_dtype == "target":
-            custom_ops.Linear.dequant_dtype = dequant_dtype
-        else:
-            custom_ops.Linear.dequant_dtype = getattr(torch, dequant_dtype)
+        if hasattr(custom_ops, 'Linear'):
+            if dequant_dtype in ("default", None):
+                custom_ops.Linear.dequant_dtype = None
+            elif dequant_dtype == "target":
+                custom_ops.Linear.dequant_dtype = dequant_dtype
+            else:
+                custom_ops.Linear.dequant_dtype = getattr(torch, dequant_dtype)
 
-        if patch_dtype in ("default", None):
-            custom_ops.Linear.patch_dtype = None
-        elif patch_dtype == "target":
-            custom_ops.Linear.patch_dtype = patch_dtype
-        else:
-            custom_ops.Linear.patch_dtype = getattr(torch, patch_dtype)
+            if patch_dtype in ("default", None):
+                custom_ops.Linear.patch_dtype = None
+            elif patch_dtype == "target":
+                custom_ops.Linear.patch_dtype = patch_dtype
+            else:
+                custom_ops.Linear.patch_dtype = getattr(torch, patch_dtype)
 
         # Load GGUF model using ComfyUI's native loading infrastructure
         model_path = folder_paths.get_full_path_or_raise("wanvideo_gguf", model)
         
         # Use ComfyUI's native GGUF state dict loading
-        sd = load_diffusion_model_state_dict(model_path, custom_operations=custom_ops)
+        if hasattr(custom_ops, 'Linear'):
+            sd = load_diffusion_model_state_dict(model_path, custom_operations=custom_ops)
+        else:
+            sd = load_diffusion_model_state_dict(model_path)
         
         # Detect WanVideo architecture from loaded state dict
         wan_arch = detect_wan_architecture(sd)
@@ -1457,7 +1464,10 @@ class WanVideoModelLoaderGGUF:
 
         # Create transformer and load GGUF weights using ComfyUI's native infrastructure
         with init_empty_weights():
-            transformer = WanModel(**TRANSFORMER_CONFIG, custom_operations=custom_ops)
+            if hasattr(custom_ops, 'Linear'):
+                transformer = WanModel(**TRANSFORMER_CONFIG, custom_operations=custom_ops)
+            else:
+                transformer = WanModel(**TRANSFORMER_CONFIG)
         transformer.eval()
         
         # Load GGUF weights into transformer using ComfyUI's native mechanism
