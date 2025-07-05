@@ -1301,10 +1301,7 @@ class WanVideoModelLoaderGGUF:
         model_path = folder_paths.get_full_path_or_raise("wanvideo_gguf", model)
         
         # Use ComfyUI's native GGUF state dict loading
-        if hasattr(custom_ops, 'Linear'):
-            sd = load_diffusion_model_state_dict(model_path, custom_operations=custom_ops)
-        else:
-            sd = load_diffusion_model_state_dict(model_path)
+        sd = load_diffusion_model_state_dict(model_path)
         
         # Detect WanVideo architecture from loaded state dict
         wan_arch = detect_wan_architecture(sd)
@@ -1464,10 +1461,7 @@ class WanVideoModelLoaderGGUF:
 
         # Create transformer and load GGUF weights using ComfyUI's native infrastructure
         with init_empty_weights():
-            if hasattr(custom_ops, 'Linear'):
-                transformer = WanModel(**TRANSFORMER_CONFIG, custom_operations=custom_ops)
-            else:
-                transformer = WanModel(**TRANSFORMER_CONFIG)
+            transformer = WanModel(**TRANSFORMER_CONFIG)
         transformer.eval()
         
         # Load GGUF weights into transformer using ComfyUI's native mechanism
