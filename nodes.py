@@ -178,7 +178,7 @@ if GGUF_AVAILABLE:
         # Detect architecture
         arch_str = get_field(reader, "general.architecture", str)
         if arch_str not in ["wan", None]:
-            log(f"Warning: Expected 'wan' architecture, got '{arch_str}', attempting to continue...")
+            print(f"Warning: Expected 'wan' architecture, got '{arch_str}', attempting to continue...")
         
         # Load state dict
         state_dict = {}
