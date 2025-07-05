@@ -12,3 +12,5 @@ tools/
 convert_*
 *.pt
 CLAUDE.md
+.claude/
+.claude/*

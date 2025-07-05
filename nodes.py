@@ -1274,50 +1274,35 @@ class WanVideoModelLoaderGGUF:
         
         assert not (vram_management_args is not None and block_swap_args is not None), "Can't use both block_swap_args and vram_management_args at the same time"
         
-        # Setup GGUF ops with quantization options  
-        ops = comfy.ops.disable_weight_init
+        # Setup GGUF custom operations with quantization options
+        from .ComfyUI_GGUF.ops import GGMLOps
+        
+        custom_ops = GGMLOps()
         
         if dequant_dtype in ("default", None):
-            ops.Linear.dequant_dtype = None
+            custom_ops.Linear.dequant_dtype = None
         elif dequant_dtype == "target":
-            ops.Linear.dequant_dtype = dequant_dtype
+            custom_ops.Linear.dequant_dtype = dequant_dtype
         else:
-            ops.Linear.dequant_dtype = getattr(torch, dequant_dtype)
+            custom_ops.Linear.dequant_dtype = getattr(torch, dequant_dtype)
 
         if patch_dtype in ("default", None):
-            ops.Linear.patch_dtype = None
+            custom_ops.Linear.patch_dtype = None
         elif patch_dtype == "target":
-            ops.Linear.patch_dtype = patch_dtype
+            custom_ops.Linear.patch_dtype = patch_dtype
         else:
-            ops.Linear.patch_dtype = getattr(torch, patch_dtype)
+            custom_ops.Linear.patch_dtype = getattr(torch, patch_dtype)
 
-        # Load GGUF model
+        # Load GGUF model using ComfyUI's native loading infrastructure
         model_path = folder_paths.get_full_path_or_raise("wanvideo_gguf", model)
         
-        # Debug: Check what prefixes exist in the GGUF file
-        if GGUF_AVAILABLE:
-            reader = gguf.GGUFReader(model_path)
-            sample_tensor_names = [tensor.name for tensor in reader.tensors[:5]]
-            print(f"Sample GGUF tensor names: {sample_tensor_names}")
-        else:
-            raise RuntimeError("GGUF not available")
+        # Use ComfyUI's native GGUF state dict loading
+        sd = load_diffusion_model_state_dict(model_path, custom_operations=custom_ops)
         
-        # Try different prefixes based on what we find
-        prefixes_to_try = ["model.diffusion_model.", "model.", ""]
-        sd, wan_arch = None, None
+        # Detect WanVideo architecture from loaded state dict
+        wan_arch = detect_wan_architecture(sd)
         
-        for prefix in prefixes_to_try:
-            try:
-                sd, wan_arch = gguf_wan_loader(model_path, handle_prefix=prefix if prefix else None, return_arch=True)
-                if "patch_embedding.weight" in sd:
-                    print(f"Successfully loaded GGUF with prefix: '{prefix}'")
-                    break
-            except Exception as e:
-                print(f"Failed with prefix '{prefix}': {e}")
-                continue
-        
-        if sd is None:
-            raise RuntimeError("Could not load GGUF model with any known prefix")
+        print(f"Successfully loaded GGUF model with native ComfyUI loading")
         
         # Continue with standard WanVideo model loading logic adapted for GGUF
         lora_low_mem_load = False
@@ -1470,174 +1455,32 @@ class WanVideoModelLoaderGGUF:
             "add_control_adapter": True if "control_adapter.conv.weight" in sd else False,
         }
 
-        # Create transformer with GGUF ops
+        # Create transformer and load GGUF weights using ComfyUI's native infrastructure
         with init_empty_weights():
-            transformer = WanModel(**TRANSFORMER_CONFIG)
+            transformer = WanModel(**TRANSFORMER_CONFIG, custom_operations=custom_ops)
         transformer.eval()
-
-        # Load GGUF weights into transformer
-        params_to_keep = {"norm", "head", "bias", "time_in", "vector_in", "patch_embedding", "time_", "img_emb", "modulation", "text_embedding", "adapter", "add"}
-        param_count = sum(1 for _ in transformer.named_parameters())
-        skipped_params = []
         
-        for name, param in tqdm(transformer.named_parameters(), 
-                desc=f"Loading GGUF transformer parameters to {transformer_load_device}", 
-                total=param_count,
-                leave=True):
+        # Load GGUF weights into transformer using ComfyUI's native mechanism
+        params_to_keep = {"norm", "head", "bias", "time_in", "vector_in", "patch_embedding", "time_", "img_emb", "modulation", "text_embedding", "adapter", "add"}
+        
+        for name, param in transformer.named_parameters():
             if name in sd:
                 tensor_data = sd[name]
                 dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else base_dtype
                 if "patch_embedding" in name:
                     dtype_to_use = torch.float32
                 
-                # Handle GGUF tensors specially - they may not support gradients
-                if hasattr(tensor_data, 'tensor_type'):
-                    # This is a quantized GGUF tensor
-                    if quantization == "disabled":
-                        # Dequantize to full precision when quantization is disabled using proper GGUF dequantization
-                        if GGUF_AVAILABLE:
-                            try:
-                                from .ComfyUI_GGUF.dequant import dequantize_tensor
-                                dequantized_tensor = dequantize_tensor(tensor_data, dtype=dtype_to_use)
-                            except ImportError:
-                                try:
-                                    # Alternative import path
-                                    import sys
-                                    import os
-                                    gguf_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ComfyUI-VideoHelperSuite", "ComfyUI-GGUF")
-                                    if os.path.exists(gguf_path):
-                                        sys.path.insert(0, gguf_path)
-                                        from dequant import dequantize_tensor
-                                        dequantized_tensor = dequantize_tensor(tensor_data, dtype=dtype_to_use)
-                                    else:
-                                        print("Warning: dequant module not available, falling back to tensor conversion")
-                                        dequantized_tensor = tensor_data.float()
-                                except ImportError:
-                                    print("Warning: dequant module not available, falling back to tensor conversion")
-                                    dequantized_tensor = tensor_data.float()
-                        else:
-                            print("Warning: GGUF not available, falling back to tensor conversion")
-                            dequantized_tensor = tensor_data.float()
-                        
-                        # Handle shape transformations for GGUF tensors
-                        expected_shape = param.shape
-                        if dequantized_tensor.shape != expected_shape:
-                            print(f"Shape mismatch for tensor '{name}': GGUF shape {dequantized_tensor.shape}, expected {expected_shape}")
-                            
-                            # Try to reshape/transpose GGUF tensor to match expected shape
-                            reshaped_tensor = None
-                            try:
-                                # For patch_embedding and similar Conv3d weights: [out, in, d, h, w] format
-                                if name == "patch_embedding.weight" and len(dequantized_tensor.shape) == 5:
-                                    # GGUF: [2, 2, 1, 48, 5120] -> Expected: [5120, 96, 1, 2, 2]
-                                    # Reshape by moving dimensions around
-                                    reshaped_tensor = dequantized_tensor.permute(4, 3, 2, 0, 1)  # Move last dim to first
-                                    # Now we have [5120, 48, 1, 2, 2], but need [5120, 96, 1, 2, 2]
-                                    # The 48*2 = 96, so we need to reshape the second dimension
-                                    if reshaped_tensor.shape[1] * reshaped_tensor.shape[3] == expected_shape[1]:
-                                        reshaped_tensor = reshaped_tensor.view(expected_shape)
-                                
-                                # For other tensors, try simple reshape if total elements match
-                                elif dequantized_tensor.numel() == param.numel():
-                                    reshaped_tensor = dequantized_tensor.view(expected_shape)
-                                
-                                if reshaped_tensor is not None and reshaped_tensor.shape == expected_shape:
-                                    print(f"Successfully reshaped tensor '{name}' from {dequantized_tensor.shape} to {expected_shape}")
-                                    # Clean up the original tensor to free VRAM
-                                    del dequantized_tensor
-                                    dequantized_tensor = reshaped_tensor
-                                    # Force garbage collection to free VRAM immediately
-                                    gc.collect()
-                                    mm.soft_empty_cache()
-                                else:
-                                    print(f"Could not reshape tensor '{name}' - skipping")
-                                    skipped_params.append((name, param.shape, dtype_to_use))
-                                    continue
-                                    
-                            except Exception as reshape_error:
-                                print(f"Reshape failed for tensor '{name}': {reshape_error}")
-                                skipped_params.append((name, param.shape, dtype_to_use))
-                                continue
-                        
-                        # Try to set the tensor
-                        try:
-                            set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=dequantized_tensor)
-                        except ValueError as e:
-                            if "shape" in str(e):
-                                print(f"Final shape mismatch for tensor '{name}': {e}")
-                                skipped_params.append((name, param.shape, dtype_to_use))
-                                continue
-                            else:
-                                raise e
-                    else:
-                        # Use quantized tensor directly
-                        module = transformer
-                        for attr in name.split('.')[:-1]:
-                            module = getattr(module, attr)
-                        setattr(module, name.split('.')[-1], torch.nn.Parameter(tensor_data.to(transformer_load_device), requires_grad=False))
-                else:
-                    # Regular tensor - handle shape transformations and use set_module_tensor_to_device
-                    expected_shape = param.shape
-                    if tensor_data.shape != expected_shape:
-                        print(f"Shape mismatch for regular tensor '{name}': GGUF shape {tensor_data.shape}, expected {expected_shape}")
-                        
-                        # Try to reshape/transpose tensor to match expected shape
-                        reshaped_tensor = None
-                        try:
-                            # For patch_embedding and similar Conv3d weights: [out, in, d, h, w] format
-                            if name == "patch_embedding.weight" and len(tensor_data.shape) == 5:
-                                # GGUF: [2, 2, 1, 48, 5120] -> Expected: [5120, 96, 1, 2, 2]
-                                reshaped_tensor = tensor_data.permute(4, 3, 2, 0, 1)  # Move last dim to first
-                                # Now we have [5120, 48, 1, 2, 2], but need [5120, 96, 1, 2, 2]
-                                # The 48*2 = 96, so we need to reshape the second dimension
-                                if reshaped_tensor.shape[1] * reshaped_tensor.shape[3] == expected_shape[1]:
-                                    reshaped_tensor = reshaped_tensor.view(expected_shape)
-                            
-                            # For other tensors, try simple reshape if total elements match
-                            elif tensor_data.numel() == param.numel():
-                                reshaped_tensor = tensor_data.view(expected_shape)
-                            
-                            if reshaped_tensor is not None and reshaped_tensor.shape == expected_shape:
-                                print(f"Successfully reshaped regular tensor '{name}' from {tensor_data.shape} to {expected_shape}")
-                                # Clean up the original tensor to free VRAM
-                                del tensor_data
-                                tensor_data = reshaped_tensor
-                                # Force garbage collection to free VRAM immediately
-                                gc.collect()
-                                mm.soft_empty_cache()
-                            else:
-                                print(f"Could not reshape regular tensor '{name}' - skipping")
-                                skipped_params.append((name, param.shape, dtype_to_use))
-                                continue
-                                
-                        except Exception as reshape_error:
-                            print(f"Reshape failed for regular tensor '{name}': {reshape_error}")
-                            skipped_params.append((name, param.shape, dtype_to_use))
-                            continue
-                    
-                    # Try to set the tensor
-                    try:
-                        set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=tensor_data)
-                    except ValueError as e:
-                        if "shape" in str(e):
-                            print(f"Final shape mismatch for regular tensor '{name}': {e}")
-                            skipped_params.append((name, param.shape, dtype_to_use))
-                            continue
-                        else:
-                            raise e
+                # Use ComfyUI's native tensor loading - no manual reshaping needed
+                set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=tensor_data)
             else:
-                # Parameter not found in GGUF state dict - initialize with zeros
-                dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else base_dtype
-                if "patch_embedding" in name:
-                    dtype_to_use = torch.float32
-                skipped_params.append((name, param.shape, dtype_to_use))
+                print(f"Warning: parameter '{name}' not found in state dict")
         
-        # Initialize any skipped parameters with zeros to avoid meta tensor issues
-        if skipped_params:
-            print(f"Initializing {len(skipped_params)} missing/incompatible parameters with zeros")
-            for name, shape, dtype_to_use in skipped_params:
-                zero_tensor = torch.zeros(shape, dtype=dtype_to_use, device=transformer_load_device)
-                set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=zero_tensor)
+        print(f"Successfully loaded GGUF transformer to {transformer_load_device}")
+        
+        # Clean up state dict to free memory
+        del sd
+        gc.collect()
+        mm.soft_empty_cache()
         
         comfy_model.diffusion_model = transformer
         comfy_model.load_device = transformer_load_device
