@@ -215,10 +215,9 @@ if GGUF_AVAILABLE:
             max_key = max(qsd.keys(), key=lambda k: qsd[k].numel())
             state_dict[max_key].is_largest_weight = True
         
-        # Detect WanVideo architecture
-        wan_arch = detect_wan_architecture(state_dict)
-        
+        # Detect WanVideo architecture only if requested
         if return_arch:
+            wan_arch = detect_wan_architecture(state_dict)
             return (state_dict, wan_arch)
         return state_dict
 
