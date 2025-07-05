@@ -1297,16 +1297,13 @@ class WanVideoModelLoaderGGUF:
             else:
                 custom_ops.Linear.patch_dtype = getattr(torch, patch_dtype)
 
-        # Load GGUF model using ComfyUI's native loading infrastructure
+        # Load GGUF model using our custom loader
         model_path = folder_paths.get_full_path_or_raise("wanvideo_gguf", model)
         
-        # Use ComfyUI's native GGUF state dict loading
-        sd = load_diffusion_model_state_dict(model_path)
+        # Use our GGUF loader that actually works with GGUF files
+        sd, wan_arch = gguf_wan_loader(model_path, return_arch=True)
         
-        # Detect WanVideo architecture from loaded state dict
-        wan_arch = detect_wan_architecture(sd)
-        
-        print(f"Successfully loaded GGUF model with native ComfyUI loading")
+        print(f"Successfully loaded GGUF model: {wan_arch}")
         
         # Continue with standard WanVideo model loading logic adapted for GGUF
         lora_low_mem_load = False
