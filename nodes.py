@@ -1859,8 +1859,13 @@ class LoadWanVideoT5TextEncoderGGUF:
         has_t5_patterns = any(key.startswith(("encoder.", "shared.", "token_embedding.")) for key in sd.keys()) if model_path.endswith(".gguf") else False
         
         if not (has_token_embedding or has_shared_weight or has_t5_patterns):
-            print(f"Available keys in state dict: {list(sd.keys())[:10]}...")  # Show first 10 keys for debugging
-            raise ValueError("Invalid T5 text encoder model, this node expects the 'umt5-xxl' model")
+            print(f"T5 validation failed - has_token_embedding: {has_token_embedding}, has_shared_weight: {has_shared_weight}, has_t5_patterns: {has_t5_patterns}")
+            print(f"Available keys in state dict: {list(sd.keys())[:20]}...")  # Show first 20 keys for debugging
+            # For GGUF T5 models, be even more permissive - just check if it has encoder-like structure
+            if model_path.endswith(".gguf") and any(key.startswith("encoder") for key in sd.keys()):
+                print("GGUF T5 model detected with encoder structure - proceeding...")
+            else:
+                raise ValueError("Invalid T5 text encoder model, this node expects the 'umt5-xxl' model")
 
         # Convert state dict keys from T5 format to the expected format (same as original)
         if "shared.weight" in sd:
