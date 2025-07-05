@@ -1855,8 +1855,8 @@ class LoadWanVideoT5TextEncoderGGUF:
         # Validate T5 model - be more flexible for GGUF models
         has_token_embedding = "token_embedding.weight" in sd
         has_shared_weight = "shared.weight" in sd
-        # For GGUF models, also check for common T5 patterns
-        has_t5_patterns = any(key.startswith(("encoder.", "shared.", "token_embedding.")) for key in sd.keys()) if model_path.endswith(".gguf") else False
+        # For GGUF models, also check for common T5 patterns including UMT5-XXL GGUF format
+        has_t5_patterns = any(key.startswith(("encoder.", "shared.", "token_embedding.", "enc.blk.")) for key in sd.keys()) if model_path.endswith(".gguf") else False
         
         if not (has_token_embedding or has_shared_weight or has_t5_patterns):
             print(f"T5 validation failed - has_token_embedding: {has_token_embedding}, has_shared_weight: {has_shared_weight}, has_t5_patterns: {has_t5_patterns}")
