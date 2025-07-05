@@ -1441,6 +1441,8 @@ class WanVideoModelLoaderGGUF:
         # Load GGUF weights into transformer
         params_to_keep = {"norm", "head", "bias", "time_in", "vector_in", "patch_embedding", "time_", "img_emb", "modulation", "text_embedding", "adapter", "add"}
         param_count = sum(1 for _ in transformer.named_parameters())
+        skipped_params = []
+        
         for name, param in tqdm(transformer.named_parameters(), 
                 desc=f"Loading GGUF transformer parameters to {transformer_load_device}", 
                 total=param_count,
@@ -1487,7 +1489,8 @@ class WanVideoModelLoaderGGUF:
                             if "shape" in str(e):
                                 print(f"Shape mismatch for tensor '{name}': GGUF shape {dequantized_tensor.shape}")
                                 print(f"Error: {e}")
-                                # Skip incompatible tensors
+                                # Track skipped parameters to initialize later
+                                skipped_params.append((name, param.shape, dtype_to_use))
                                 continue
                             else:
                                 raise e
@@ -1500,6 +1503,19 @@ class WanVideoModelLoaderGGUF:
                 else:
                     # Regular tensor - use set_module_tensor_to_device normally
                     set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=tensor_data)
+            else:
+                # Parameter not found in GGUF state dict - initialize with zeros
+                dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else base_dtype
+                if "patch_embedding" in name:
+                    dtype_to_use = torch.float32
+                skipped_params.append((name, param.shape, dtype_to_use))
+        
+        # Initialize any skipped parameters with zeros to avoid meta tensor issues
+        if skipped_params:
+            print(f"Initializing {len(skipped_params)} missing/incompatible parameters with zeros")
+            for name, shape, dtype_to_use in skipped_params:
+                zero_tensor = torch.zeros(shape, dtype=dtype_to_use, device=transformer_load_device)
+                set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=zero_tensor)
         
         comfy_model.diffusion_model = transformer
         comfy_model.load_device = transformer_load_device
