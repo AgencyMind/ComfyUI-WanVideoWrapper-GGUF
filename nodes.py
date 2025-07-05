@@ -1293,7 +1293,28 @@ class WanVideoModelLoaderGGUF:
 
         # Load GGUF model
         model_path = folder_paths.get_full_path_or_raise("wanvideo_gguf", model)
-        sd, wan_arch = gguf_wan_loader(model_path, handle_prefix="model.diffusion_model.", return_arch=True)
+        
+        # Debug: Check what prefixes exist in the GGUF file
+        reader = gguf.GGUFReader(model_path)
+        sample_tensor_names = [tensor.name for tensor in reader.tensors[:5]]
+        print(f"Sample GGUF tensor names: {sample_tensor_names}")
+        
+        # Try different prefixes based on what we find
+        prefixes_to_try = ["model.diffusion_model.", "model.", ""]
+        sd, wan_arch = None, None
+        
+        for prefix in prefixes_to_try:
+            try:
+                sd, wan_arch = gguf_wan_loader(model_path, handle_prefix=prefix if prefix else None, return_arch=True)
+                if "patch_embedding.weight" in sd:
+                    print(f"Successfully loaded GGUF with prefix: '{prefix}'")
+                    break
+            except Exception as e:
+                print(f"Failed with prefix '{prefix}': {e}")
+                continue
+        
+        if sd is None:
+            raise RuntimeError("Could not load GGUF model with any known prefix")
         
         # Continue with standard WanVideo model loading logic adapted for GGUF
         lora_low_mem_load = False
