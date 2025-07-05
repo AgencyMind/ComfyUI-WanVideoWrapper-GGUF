@@ -1451,7 +1451,17 @@ class WanVideoModelLoaderGGUF:
                 dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else base_dtype
                 if "patch_embedding" in name:
                     dtype_to_use = torch.float32
-                set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=tensor_data)
+                
+                # Handle GGUF tensors specially - they may not support gradients
+                if hasattr(tensor_data, 'tensor_type'):
+                    # This is a quantized GGUF tensor - use it directly without trying to preserve gradients
+                    module = transformer
+                    for attr in name.split('.')[:-1]:
+                        module = getattr(module, attr)
+                    setattr(module, name.split('.')[-1], torch.nn.Parameter(tensor_data.to(transformer_load_device), requires_grad=False))
+                else:
+                    # Regular tensor - use set_module_tensor_to_device normally
+                    set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=tensor_data)
         
         comfy_model.diffusion_model = transformer
         comfy_model.load_device = transformer_load_device
