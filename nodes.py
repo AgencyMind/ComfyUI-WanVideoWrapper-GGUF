@@ -1519,14 +1519,47 @@ class WanVideoModelLoaderGGUF:
                             print("Warning: GGUF not available, falling back to tensor conversion")
                             dequantized_tensor = tensor_data.float()
                         
-                        # Check for shape compatibility before setting
+                        # Handle shape transformations for GGUF tensors
+                        expected_shape = param.shape
+                        if dequantized_tensor.shape != expected_shape:
+                            print(f"Shape mismatch for tensor '{name}': GGUF shape {dequantized_tensor.shape}, expected {expected_shape}")
+                            
+                            # Try to reshape/transpose GGUF tensor to match expected shape
+                            reshaped_tensor = None
+                            try:
+                                # For patch_embedding and similar Conv3d weights: [out, in, d, h, w] format
+                                if name == "patch_embedding.weight" and len(dequantized_tensor.shape) == 5:
+                                    # GGUF: [2, 2, 1, 48, 5120] -> Expected: [5120, 96, 1, 2, 2]
+                                    # Reshape by moving dimensions around
+                                    reshaped_tensor = dequantized_tensor.permute(4, 3, 2, 0, 1)  # Move last dim to first
+                                    # Now we have [5120, 48, 1, 2, 2], but need [5120, 96, 1, 2, 2]
+                                    # The 48*2 = 96, so we need to reshape the second dimension
+                                    if reshaped_tensor.shape[1] * reshaped_tensor.shape[3] == expected_shape[1]:
+                                        reshaped_tensor = reshaped_tensor.view(expected_shape)
+                                
+                                # For other tensors, try simple reshape if total elements match
+                                elif dequantized_tensor.numel() == param.numel():
+                                    reshaped_tensor = dequantized_tensor.view(expected_shape)
+                                
+                                if reshaped_tensor is not None and reshaped_tensor.shape == expected_shape:
+                                    print(f"Successfully reshaped tensor '{name}' from {dequantized_tensor.shape} to {expected_shape}")
+                                    dequantized_tensor = reshaped_tensor
+                                else:
+                                    print(f"Could not reshape tensor '{name}' - skipping")
+                                    skipped_params.append((name, param.shape, dtype_to_use))
+                                    continue
+                                    
+                            except Exception as reshape_error:
+                                print(f"Reshape failed for tensor '{name}': {reshape_error}")
+                                skipped_params.append((name, param.shape, dtype_to_use))
+                                continue
+                        
+                        # Try to set the tensor
                         try:
                             set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=dequantized_tensor)
                         except ValueError as e:
                             if "shape" in str(e):
-                                print(f"Shape mismatch for tensor '{name}': GGUF shape {dequantized_tensor.shape}")
-                                print(f"Error: {e}")
-                                # Track skipped parameters to initialize later
+                                print(f"Final shape mismatch for tensor '{name}': {e}")
                                 skipped_params.append((name, param.shape, dtype_to_use))
                                 continue
                             else:
