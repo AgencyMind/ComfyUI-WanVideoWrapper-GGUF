@@ -193,7 +193,7 @@ if GGUF_AVAILABLE:
             
             shape = get_orig_shape(reader, tensor_name)
             if shape is None:
-                shape = torch.Size(tuple(int(v) for v in reversed(tensor.shape)))
+                shape = torch.Size(tuple(int(v) for v in tensor.shape))
             
             # Create GGMLTensor for quantized weights
             if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
