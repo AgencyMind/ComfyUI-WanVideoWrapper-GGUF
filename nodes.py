@@ -1852,8 +1852,14 @@ class LoadWanVideoT5TextEncoderGGUF:
             if "scaled_fp8" in sd:
                 raise ValueError("Invalid T5 text encoder model, fp8 scaled is not supported by this node")
 
-        # Validate T5 model
-        if "token_embedding.weight" not in sd and "shared.weight" not in sd:
+        # Validate T5 model - be more flexible for GGUF models
+        has_token_embedding = "token_embedding.weight" in sd
+        has_shared_weight = "shared.weight" in sd
+        # For GGUF models, also check for common T5 patterns
+        has_t5_patterns = any(key.startswith(("encoder.", "shared.", "token_embedding.")) for key in sd.keys()) if model_path.endswith(".gguf") else False
+        
+        if not (has_token_embedding or has_shared_weight or has_t5_patterns):
+            print(f"Available keys in state dict: {list(sd.keys())[:10]}...")  # Show first 10 keys for debugging
             raise ValueError("Invalid T5 text encoder model, this node expects the 'umt5-xxl' model")
 
         # Convert state dict keys from T5 format to the expected format (same as original)
