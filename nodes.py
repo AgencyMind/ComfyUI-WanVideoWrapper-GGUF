@@ -1366,32 +1366,91 @@ class WanVideoModelLoaderGGUF:
 
         # Create WanVideo model with GGUF ops
         comfy_model = WanVideoModel(
-            model_type=model_type,
-            dim=dim,
-            in_channels=in_channels,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            ffn_dim=ffn_dim,
-            vace_layers=vace_layers,
-            vace_in_dim=vace_in_dim,
-            attention_mode=attention_mode,
-            rope_params=rope_params,
-            model_options={"custom_operations": ops}
+            WanVideoModelConfig(base_dtype),
+            model_type=comfy.model_base.ModelType.FLOW,
+            device=device,
         )
         
-        # Load GGUF weights into model
-        with init_empty_weights():
-            transformer = comfy_model.diffusion_model
+        # Get coefficients and ratios for the detected model variant
+        teacache_coefficients_map = {
+            "1_3B": {
+                "t2v": {
+                    "cond": [0.058, 0.036],
+                    "uncond": [0.030, 0.040]
+                },
+                "i2v": {
+                    "cond": [0.065, 0.039],
+                    "uncond": [0.028, 0.032]
+                }
+            },
+            "14B": {
+                "t2v": {
+                    "cond": [0.110, 0.151],
+                    "uncond": [0.124, 0.206]
+                },
+                "i2v": {
+                    "cond": [0.136, 0.162],
+                    "uncond": [0.127, 0.212]
+                }
+            }
+        }
+        magcache_ratios_map = {
+            "1_3B": {
+                "t2v": [1.0, 1.0, 1.0, 1.0, 1.0, 0.1, 0.1, 0.1, 0.1, 0.1],
+                "i2v": [1.0, 1.0, 1.0, 1.0, 1.0, 0.1, 0.1, 0.1, 0.1, 0.1]
+            },
+            "14B": {
+                "t2v": [1.0, 1.0, 1.0, 1.0, 1.0, 0.1, 0.1, 0.1, 0.1, 0.1],
+                "i2v": [1.0, 1.0, 1.0, 1.0, 1.0, 0.1, 0.1, 0.1, 0.1, 0.1]
+            }
+        }
+        
+        if dim == 1536:
+            model_variant = "1_3B"
+        else:
+            model_variant = "14B"
+            
+        TRANSFORMER_CONFIG = {
+            "dim": dim,
+            "ffn_dim": ffn_dim,
+            "eps": 1e-06,
+            "freq_dim": 256,
+            "in_dim": in_channels,
+            "model_type": model_type,
+            "out_dim": 16,
+            "text_len": 512,
+            "num_heads": num_heads,
+            "num_layers": num_layers,
+            "attention_mode": attention_mode,
+            "main_device": device,
+            "offload_device": offload_device,
+            "teacache_coefficients": teacache_coefficients_map[model_variant],
+            "magcache_ratios": magcache_ratios_map[model_variant],
+            "vace_layers": vace_layers,
+            "vace_in_dim": vace_in_dim,
+            "inject_sample_info": True if "fps_embedding.weight" in sd else False,
+            "add_ref_conv": True if "ref_conv.weight" in sd else False,
+            "in_dim_ref_conv": sd["ref_conv.weight"].shape[1] if "ref_conv.weight" in sd else None,
+            "add_control_adapter": True if "control_adapter.conv.weight" in sd else False,
+        }
 
-        for name, param in transformer.named_parameters():
+        # Create transformer with GGUF ops
+        with init_empty_weights():
+            transformer = WanModel(**TRANSFORMER_CONFIG)
+        transformer.eval()
+
+        # Load GGUF weights into transformer
+        params_to_keep = {"norm", "head", "bias", "time_in", "vector_in", "patch_embedding", "time_", "img_emb", "modulation", "text_embedding", "adapter", "add"}
+        param_count = sum(1 for _ in transformer.named_parameters())
+        for name, param in tqdm(transformer.named_parameters(), 
+                desc=f"Loading GGUF transformer parameters to {transformer_load_device}", 
+                total=param_count,
+                leave=True):
             if name in sd:
                 tensor_data = sd[name]
-                dtype_to_use = base_dtype
-                if quantization != "disabled":
-                    if name.endswith(".weight") and len(tensor_data.shape) >= 2:
-                        dtype_to_use = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "fp8_e5m2": torch.float8_e5m2}[quantization]
-                    else:
-                        dtype_to_use = torch.float32
+                dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else base_dtype
+                if "patch_embedding" in name:
+                    dtype_to_use = torch.float32
                 set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=tensor_data)
         
         comfy_model.diffusion_model = transformer
