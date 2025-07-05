@@ -1455,8 +1455,13 @@ class WanVideoModelLoaderGGUF:
                 if hasattr(tensor_data, 'tensor_type'):
                     # This is a quantized GGUF tensor
                     if quantization == "disabled":
-                        # Dequantize to full precision when quantization is disabled
-                        dequantized_tensor = tensor_data.float()  # Convert to full precision
+                        # Dequantize to full precision when quantization is disabled using proper GGUF dequantization
+                        try:
+                            from dequant import dequantize_tensor
+                            dequantized_tensor = dequantize_tensor(tensor_data, dtype=dtype_to_use)
+                        except ImportError:
+                            print("Warning: dequant module not available, falling back to tensor conversion")
+                            dequantized_tensor = tensor_data.float()
                         set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=dequantized_tensor)
                     else:
                         # Use quantized tensor directly
