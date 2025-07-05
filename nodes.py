@@ -1479,7 +1479,18 @@ class WanVideoModelLoaderGGUF:
                         else:
                             print("Warning: GGUF not available, falling back to tensor conversion")
                             dequantized_tensor = tensor_data.float()
-                        set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=dequantized_tensor)
+                        
+                        # Check for shape compatibility before setting
+                        try:
+                            set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=dequantized_tensor)
+                        except ValueError as e:
+                            if "shape" in str(e):
+                                print(f"Shape mismatch for tensor '{name}': GGUF shape {dequantized_tensor.shape}")
+                                print(f"Error: {e}")
+                                # Skip incompatible tensors
+                                continue
+                            else:
+                                raise e
                     else:
                         # Use quantized tensor directly
                         module = transformer
