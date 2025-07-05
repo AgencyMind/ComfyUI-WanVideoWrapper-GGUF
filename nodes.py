@@ -34,10 +34,193 @@ from comfy.clip_vision import clip_preprocess, ClipVisionModel
 from comfy.sd import load_lora_for_models
 from comfy.cli_args import args, LatentPreviewMethod
 
+# GGUF support imports
+try:
+    import gguf
+    from comfy.sd import load_diffusion_model_state_dict
+    import warnings
+    import comfy.ops
+    GGUF_AVAILABLE = True
+except ImportError:
+    log("GGUF support not available. Install ComfyUI-GGUF extension for GGUF model support.")
+    GGUF_AVAILABLE = False
+
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
 VAE_STRIDE = (4, 8, 8)
 PATCH_SIZE = (1, 2, 2)
+
+# GGUF folder path management
+def update_folder_names_and_paths(key, targets=[]):
+    """Update folder paths for GGUF model support"""
+    if not GGUF_AVAILABLE:
+        return
+    
+    base = folder_paths.folder_names_and_paths.get(key, ([], {}))
+    base = base[0] if isinstance(base[0], (list, set, tuple)) else []
+    target = next((x for x in targets if x in folder_paths.folder_names_and_paths), targets[0])
+    orig, _ = folder_paths.folder_names_and_paths.get(target, ([], {}))
+    folder_paths.folder_names_and_paths[key] = (orig or base, {".gguf"})
+
+# Register GGUF file types for WanVideo models
+if GGUF_AVAILABLE:
+    update_folder_names_and_paths("wanvideo_gguf", ["diffusion_models", "unet"])
+    update_folder_names_and_paths("wanvideo_text_gguf", ["text_encoders", "clip"])
+    update_folder_names_and_paths("multitalk_gguf", ["diffusion_models"])
+    update_folder_names_and_paths("wanvideo_vae_gguf", ["vae"])
+
+# GGUF support classes and functions
+if GGUF_AVAILABLE:
+    class GGMLTensor(torch.Tensor):
+        """
+        Main tensor-like class for storing quantized weights
+        """
+        def __init__(self, *args, tensor_type, tensor_shape, patches=[], **kwargs):
+            super().__init__()
+            self.tensor_type = tensor_type
+            self.tensor_shape = tensor_shape
+            self.patches = patches
+            self.is_largest_weight = False
+
+        def __new__(cls, *args, tensor_type, tensor_shape, patches=[], **kwargs):
+            return super().__new__(cls, *args, **kwargs)
+
+        def to(self, *args, **kwargs):
+            new = super().to(*args, **kwargs)
+            new.tensor_type = getattr(self, "tensor_type", None)
+            new.tensor_shape = getattr(self, "tensor_shape", new.data.shape)
+            new.patches = getattr(self, "patches", []).copy()
+            new.is_largest_weight = getattr(self, "is_largest_weight", False)
+            return new
+
+        @property
+        def shape(self):
+            if not hasattr(self, "tensor_shape"):
+                self.tensor_shape = self.size()
+            return self.tensor_shape
+
+    def get_field(reader, field_name, field_type):
+        field = reader.get_field(field_name)
+        if field is None:
+            return None
+        elif field_type == str:
+            if len(field.types) != 1 or field.types[0] != gguf.GGUFValueType.STRING:
+                raise TypeError(f"Bad type for GGUF {field_name} key: expected string, got {field.types!r}")
+            return str(field.parts[field.data[-1]], encoding="utf-8")
+        elif field_type in [int, float, bool]:
+            return field_type(field.parts[field.data[-1]])
+        else:
+            raise TypeError(f"Unknown field type {field_type}")
+
+    def get_orig_shape(reader, tensor_name):
+        field_key = f"comfy.gguf.orig_shape.{tensor_name}"
+        field = reader.get_field(field_key)
+        if field is None:
+            return None
+        if len(field.types) != 2 or field.types[0] != gguf.GGUFValueType.ARRAY or field.types[1] != gguf.GGUFValueType.INT32:
+            raise TypeError(f"Bad original shape metadata for {field_key}: Expected ARRAY of INT32, got {field.types}")
+        return torch.Size(tuple(int(field.parts[part_idx][0]) for part_idx in field.data))
+
+    def is_quantized(tensor):
+        return tensor is not None and hasattr(tensor, "tensor_type") and tensor.tensor_type not in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}
+    
+    def detect_wan_architecture(tensors):
+        """
+        Detect Wan video model architecture from tensor names
+        """
+        tensor_names = set(tensors.keys())
+        
+        # Check for required WanVideo tensors
+        if "patch_embedding.weight" not in tensor_names:
+            raise ValueError("Invalid WanVideo model: missing patch_embedding.weight")
+        
+        # Detect architecture based on tensor presence and dimensions
+        if "text_embedding.0.weight" not in tensor_names:
+            return "no_cross_attn"  # minimaxremover
+        elif "img_emb.emb_pos" in tensor_names:
+            return "fl2v"  # FusionX FL2V
+        elif "control_adapter.conv.weight" in tensor_names:
+            return "t2v"  # T2V with control adapter
+        else:
+            # Determine by input channels
+            patch_emb_shape = tensors["patch_embedding.weight"].shape
+            in_channels = patch_emb_shape[1]
+            
+            if in_channels in [36, 48]:
+                return "i2v"  # Image-to-video
+            elif in_channels == 16:
+                return "t2v"  # Text-to-video
+            else:
+                return "t2v"  # Default fallback
+    
+    def gguf_wan_loader(path, handle_prefix="model.diffusion_model.", return_arch=False):
+        """
+        Load GGUF WanVideo model state dict with proper architecture detection
+        """
+        reader = gguf.GGUFReader(path)
+        
+        # Filter and strip prefix
+        has_prefix = False
+        if handle_prefix is not None:
+            prefix_len = len(handle_prefix)
+            tensor_names = set(tensor.name for tensor in reader.tensors)
+            has_prefix = any(s.startswith(handle_prefix) for s in tensor_names)
+
+        tensors = []
+        for tensor in reader.tensors:
+            sd_key = tensor_name = tensor.name
+            if has_prefix:
+                if not tensor_name.startswith(handle_prefix):
+                    continue
+                sd_key = tensor_name[prefix_len:]
+            tensors.append((sd_key, tensor))
+
+        # Detect architecture
+        arch_str = get_field(reader, "general.architecture", str)
+        if arch_str not in ["wan", None]:
+            log(f"Warning: Expected 'wan' architecture, got '{arch_str}', attempting to continue...")
+        
+        # Load state dict
+        state_dict = {}
+        qtype_dict = {}
+        
+        for sd_key, tensor in tensors:
+            tensor_name = tensor.name
+            
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="The given NumPy array is not writable")
+                torch_tensor = torch.from_numpy(tensor.data)  # mmap
+            
+            shape = get_orig_shape(reader, tensor_name)
+            if shape is None:
+                shape = torch.Size(tuple(int(v) for v in reversed(tensor.shape)))
+            
+            # Create GGMLTensor for quantized weights
+            if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
+                torch_tensor = torch_tensor.view(*shape)
+                state_dict[sd_key] = torch_tensor
+            else:
+                state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
+            
+            # Track tensor types
+            tensor_type_str = getattr(tensor.tensor_type, "name", repr(tensor.tensor_type))
+            qtype_dict[tensor_type_str] = qtype_dict.get(tensor_type_str, 0) + 1
+        
+        # Log loaded tensor type counts
+        log(f"GGUF WanVideo model qtypes: {', '.join(f'{k} ({v})' for k, v in qtype_dict.items())}")
+        
+        # Mark largest quantized tensor for VRAM estimation
+        qsd = {k: v for k, v in state_dict.items() if is_quantized(v)}
+        if len(qsd) > 0:
+            max_key = max(qsd.keys(), key=lambda k: qsd[k].numel())
+            state_dict[max_key].is_largest_weight = True
+        
+        # Detect WanVideo architecture
+        wan_arch = detect_wan_architecture(state_dict)
+        
+        if return_arch:
+            return (state_dict, wan_arch)
+        return state_dict
 
 def add_noise_to_reference_video(image, ratio=None):
     sigma = torch.ones((image.shape[0],)).to(image.device, image.dtype) * ratio 
@@ -1033,6 +1216,243 @@ class WanVideoModelLoader:
         for model in mm.current_loaded_models:
             if model._model() == patcher:
                 mm.current_loaded_models.remove(model)            
+
+        return (patcher,)
+
+class WanVideoModelLoaderGGUF:
+    @classmethod
+    def INPUT_TYPES(s):
+        if not GGUF_AVAILABLE:
+            return {
+                "required": {
+                    "model": (["GGUF_NOT_AVAILABLE"], {"tooltip": "GGUF support not available. Install ComfyUI-GGUF extension."}),
+                    "base_precision": (["fp32", "bf16", "fp16", "fp16_fast"], {"default": "bf16"}),
+                    "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_e5m2', 'fp8_e4m3fn_fast_no_ffn'], {"default": 'disabled'}),
+                    "load_device": (["main_device", "offload_device"], {"default": "main_device"}),
+                },
+                "optional": {
+                    "attention_mode": (["sdpa", "flash_attn_2", "flash_attn_3", "sageattn", "flex_attention"], {"default": "sdpa"}),
+                    "dequant_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
+                    "patch_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
+                    "patch_on_device": ("BOOLEAN", {"default": False}),
+                }
+            }
+        
+        return {
+            "required": {
+                "model": (folder_paths.get_filename_list("wanvideo_gguf"), {"tooltip": "GGUF quantized WanVideo models loaded from 'ComfyUI/models/diffusion_models' folder"}),
+                "base_precision": (["fp32", "bf16", "fp16", "fp16_fast"], {"default": "bf16"}),
+                "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_e5m2', 'fp8_e4m3fn_fast_no_ffn'], {"default": 'disabled'}),
+                "load_device": (["main_device", "offload_device"], {"default": "main_device"}),
+            },
+            "optional": {
+                "attention_mode": (["sdpa", "flash_attn_2", "flash_attn_3", "sageattn", "flex_attention"], {"default": "sdpa"}),
+                "dequant_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
+                "patch_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
+                "patch_on_device": ("BOOLEAN", {"default": False}),
+                "compile_args": ("WANCOMPILEARGS", ),
+                "block_swap_args": ("BLOCKSWAPARGS", ),
+                "lora": ("WANVIDLORA", {"default": None}),
+                "vram_management_args": ("VRAM_MANAGEMENTARGS", {"default": None}),
+                "vace_model": ("VACEPATH", {"default": None}),
+                "fantasytalking_model": ("FANTASYTALKINGMODEL", {"default": None}),
+                "multitalk_model": ("MULTITALKMODEL", {"default": None}),
+            }
+        }
+
+    RETURN_TYPES = ("WANVIDEOMODEL",)
+    RETURN_NAMES = ("model", )
+    FUNCTION = "loadmodel"
+    CATEGORY = "WanVideoWrapper"
+
+    def loadmodel(self, model, base_precision, load_device, quantization, attention_mode="sdpa", 
+                  dequant_dtype="default", patch_dtype="default", patch_on_device=False,
+                  compile_args=None, block_swap_args=None, lora=None, vram_management_args=None, 
+                  vace_model=None, fantasytalking_model=None, multitalk_model=None):
+        
+        if not GGUF_AVAILABLE:
+            raise RuntimeError("GGUF support not available. Install ComfyUI-GGUF extension.")
+        
+        assert not (vram_management_args is not None and block_swap_args is not None), "Can't use both block_swap_args and vram_management_args at the same time"
+        
+        # Setup GGUF ops with quantization options  
+        ops = comfy.ops.disable_weight_init
+        
+        if dequant_dtype in ("default", None):
+            ops.Linear.dequant_dtype = None
+        elif dequant_dtype == "target":
+            ops.Linear.dequant_dtype = dequant_dtype
+        else:
+            ops.Linear.dequant_dtype = getattr(torch, dequant_dtype)
+
+        if patch_dtype in ("default", None):
+            ops.Linear.patch_dtype = None
+        elif patch_dtype == "target":
+            ops.Linear.patch_dtype = patch_dtype
+        else:
+            ops.Linear.patch_dtype = getattr(torch, patch_dtype)
+
+        # Load GGUF model
+        model_path = folder_paths.get_full_path_or_raise("wanvideo_gguf", model)
+        sd, wan_arch = gguf_wan_loader(model_path, handle_prefix="model.diffusion_model.", return_arch=True)
+        
+        # Continue with standard WanVideo model loading logic adapted for GGUF
+        lora_low_mem_load = False
+        if lora is not None:
+            for l in lora:
+                lora_low_mem_load = l.get("low_mem_load") if lora is not None else False
+
+        transformer = None
+        mm.unload_all_models()
+        mm.cleanup_models()
+        mm.soft_empty_cache()
+        manual_offloading = True
+        
+        if "sage" in attention_mode:
+            try:
+                from sageattention import sageattn
+            except Exception as e:
+                raise ValueError(f"Can't import SageAttention: {str(e)}")
+
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+        transformer_load_device = device if load_device == "main_device" else offload_device
+        
+        base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "bf16": torch.bfloat16, "fp16": torch.float16, "fp16_fast": torch.float16, "fp32": torch.float32}[base_precision]
+        
+        # Handle fp16_fast setting
+        if base_precision == "fp16_fast":
+            if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
+                torch.backends.cuda.matmul.allow_fp16_accumulation = True
+            else:
+                raise ValueError("torch.backends.cuda.matmul.allow_fp16_accumulation not available")
+        else:
+            try:
+                if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
+                    torch.backends.cuda.matmul.allow_fp16_accumulation = False
+            except:
+                pass
+        
+        # VACE model integration
+        if vace_model is not None:
+            vace_sd = load_torch_file(vace_model["path"], device=transformer_load_device, safe_load=True)
+            sd.update(vace_sd)
+
+        # Detect model parameters from GGUF state dict
+        if not "patch_embedding.weight" in sd:
+            raise ValueError("Invalid WanVideo model selected")
+        
+        dim = sd["patch_embedding.weight"].shape[0]
+        in_channels = sd["patch_embedding.weight"].shape[1]
+        log.info(f"Detected model in_channels: {in_channels}")
+        ffn_dim = sd["blocks.0.ffn.0.bias"].shape[0]
+        model_type = wan_arch
+        
+        num_heads = 40 if dim == 5120 else 12
+        num_layers = 40 if dim == 5120 else 30
+
+        vace_layers, vace_in_dim = None, None
+        if "vace_blocks.0.after_proj.weight" in sd:
+            if in_channels != 16:
+                raise ValueError("VACE only works properly with T2V models.")
+            model_type = "t2v"
+            if dim == 5120:
+                vace_layers = [0, 5, 10, 15, 20, 25, 30, 35]
+            else:
+                vace_layers = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28]
+            vace_in_dim = 96
+
+        log.info(f"Model type: {model_type}, num_heads: {num_heads}, num_layers: {num_layers}")
+
+        # Create WanVideo model with GGUF ops
+        comfy_model = WanVideoModel(
+            model_type=model_type,
+            dim=dim,
+            in_channels=in_channels,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            ffn_dim=ffn_dim,
+            vace_layers=vace_layers,
+            vace_in_dim=vace_in_dim,
+            attention_mode=attention_mode,
+            rope_params=rope_params,
+            model_options={"custom_operations": ops}
+        )
+        
+        # Load GGUF weights into model
+        with init_empty_weights():
+            transformer = comfy_model.diffusion_model
+
+        for name, param in transformer.named_parameters():
+            if name in sd:
+                tensor_data = sd[name]
+                dtype_to_use = base_dtype
+                if quantization != "disabled":
+                    if name.endswith(".weight") and len(tensor_data.shape) >= 2:
+                        dtype_to_use = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "fp8_e5m2": torch.float8_e5m2}[quantization]
+                    else:
+                        dtype_to_use = torch.float32
+                set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=tensor_data)
+        
+        comfy_model.diffusion_model = transformer
+        comfy_model.load_device = transformer_load_device
+        
+        # Create GGUF model patcher
+        try:
+            from .ComfyUI_GGUF.nodes import GGUFModelPatcher
+            patcher = GGUFModelPatcher(comfy_model, device, offload_device)
+        except ImportError:
+            # Fallback to standard model patcher if GGUF extension not found
+            log.warning("GGUF extension not found, using standard ModelPatcher")
+            patcher = comfy.model_patcher.ModelPatcher(comfy_model, device, offload_device)
+        patcher.model.is_patched = False
+        patcher.patch_on_device = patch_on_device
+
+        # Apply LoRA if provided
+        control_lora = False
+        if lora is not None:
+            for l in lora:
+                if l.get("control_lora", False):
+                    control_lora = True
+                    break
+            patcher, control_lora = apply_lora(patcher, lora, lora_low_mem_load)
+
+        # Apply compile args if provided
+        if compile_args is not None:
+            if compile_args["compile_transformer_blocks_only"]:
+                for i, block in enumerate(patcher.model.diffusion_model.blocks):
+                    patcher.model.diffusion_model.blocks[i] = torch.compile(block, **compile_args)
+                if vace_layers is not None:
+                    for i, block in enumerate(patcher.model.diffusion_model.vace_blocks):
+                        patcher.model.diffusion_model.vace_blocks[i] = torch.compile(block, **compile_args)
+            else:
+                patcher.model.diffusion_model = torch.compile(patcher.model.diffusion_model, **compile_args)
+
+        # Handle device placement
+        if load_device == "offload_device" and patcher.model.diffusion_model.device != offload_device:
+            log.info(f"Moving diffusion model from {patcher.model.diffusion_model.device} to {offload_device}")
+            patcher.model.diffusion_model.to(offload_device)
+            gc.collect()
+            mm.soft_empty_cache()
+
+        # Set model metadata
+        patcher.model["dtype"] = base_dtype
+        patcher.model["base_path"] = model_path
+        patcher.model["model_name"] = model
+        patcher.model["manual_offloading"] = manual_offloading
+        patcher.model["quantization"] = quantization
+        patcher.model["auto_cpu_offload"] = True if vram_management_args is not None else False
+        patcher.model["control_lora"] = control_lora
+
+        # Set transformer options
+        if 'transformer_options' not in patcher.model_options:
+            patcher.model_options['transformer_options'] = {}
+        patcher.model_options["transformer_options"]["block_swap_args"] = block_swap_args
+
+        # Clean up model management
+        for model in mm.current_loaded_models:
+            if model._model() == patcher:
+                mm.current_loaded_models.remove(model)
 
         return (patcher,)
 
@@ -4408,6 +4828,7 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoTextEncode": WanVideoTextEncode,
     "WanVideoTextEncodeSingle": WanVideoTextEncodeSingle,
     "WanVideoModelLoader": WanVideoModelLoader,
+    "WanVideoModelLoaderGGUF": WanVideoModelLoaderGGUF,
     "WanVideoVAELoader": WanVideoVAELoader,
     "LoadWanVideoT5TextEncoder": LoadWanVideoT5TextEncoder,
     "WanVideoImageClipEncode": WanVideoImageClipEncode,#deprecated
@@ -4451,6 +4872,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoTextEncodeSingle": "WanVideo TextEncodeSingle",
     "WanVideoTextImageEncode": "WanVideo TextImageEncode (IP2V)",
     "WanVideoModelLoader": "WanVideo Model Loader",
+    "WanVideoModelLoaderGGUF": "WanVideo Model Loader (GGUF)",
     "WanVideoVAELoader": "WanVideo VAE Loader",
     "LoadWanVideoT5TextEncoder": "Load WanVideo T5 TextEncoder",
     "WanVideoImageClipEncode": "WanVideo ImageClip Encode (Deprecated)",

@@ -6,6 +6,43 @@ from accelerate.utils import set_module_tensor_to_device
 import torch
 from ..utils import log
 
+# GGUF support imports
+try:
+    from ..ComfyUI_GGUF.ops import GGMLOps
+    from ..ComfyUI_GGUF.loader import gguf_sd_loader
+    from ..ComfyUI_GGUF.dequant import dequantize_tensor, is_quantized
+    GGUF_AVAILABLE = True
+except ImportError:
+    try:
+        # Alternative import path
+        import sys
+        import os
+        gguf_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ComfyUI-VideoHelperSuite", "ComfyUI-GGUF")
+        if os.path.exists(gguf_path):
+            sys.path.insert(0, gguf_path)
+            from ops import GGMLOps
+            from loader import gguf_sd_loader
+            from dequant import dequantize_tensor, is_quantized
+            GGUF_AVAILABLE = True
+        else:
+            GGUF_AVAILABLE = False
+    except ImportError:
+        GGUF_AVAILABLE = False
+
+# Add multitalk_gguf folder support
+if GGUF_AVAILABLE:
+    def update_folder_names_and_paths(key, targets=[]):
+        # check for existing key
+        base = folder_paths.folder_names_and_paths.get(key, ([], {}))
+        base = base[0] if isinstance(base[0], (list, set, tuple)) else []
+        # find base key & add w/ fallback
+        target = next((x for x in targets if x in folder_paths.folder_names_and_paths), targets[0])
+        orig, _ = folder_paths.folder_names_and_paths.get(target, ([], {}))
+        folder_paths.folder_names_and_paths[key] = (orig or base, {".gguf"})
+    
+    # Add multitalk_gguf folder
+    update_folder_names_and_paths("multitalk_gguf", ["diffusion_models"])
+
 
 class MultiTalkModelLoader:
     @classmethod
@@ -64,6 +101,159 @@ class MultiTalkModelLoader:
 
         return (multitalk,)
     
+
+class MultiTalkModelLoaderGGUF:
+    @classmethod
+    def INPUT_TYPES(s):
+        if not GGUF_AVAILABLE:
+            return {
+                "required": {
+                    "model": (["GGUF_NOT_AVAILABLE"], {"tooltip": "ComfyUI-GGUF extension not found. Please install ComfyUI-GGUF to use this node."}),
+                    "base_precision": (["fp32", "bf16", "fp16"], {"default": "fp16"}),
+                },
+            }
+        
+        return {
+            "required": {
+                "model": (folder_paths.get_filename_list("multitalk_gguf"), {"tooltip": "GGUF quantized MultiTalk models loaded from 'ComfyUI/models/diffusion_models' folder"}),
+                "base_precision": (["fp32", "bf16", "fp16"], {"default": "fp16"}),
+                "dequant_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default", "tooltip": "Data type for dequantization operations"}),
+                "patch_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default", "tooltip": "Data type for patch operations"}),
+            },
+        }
+
+    RETURN_TYPES = ("MULTITALKMODEL",)
+    RETURN_NAMES = ("model", )
+    FUNCTION = "loadmodel"
+    CATEGORY = "WanVideoWrapper"
+
+    def loadmodel(self, model, base_precision, dequant_dtype="default", patch_dtype="default"):
+        if not GGUF_AVAILABLE:
+            raise RuntimeError("ComfyUI-GGUF extension not found. Please install ComfyUI-GGUF to use GGUF MultiTalk models.")
+        
+        from .multitalk import AudioProjModel
+
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+        base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "bf16": torch.bfloat16, "fp16": torch.float16, "fp16_fast": torch.float16, "fp32": torch.float32}[base_precision]
+        
+        # Setup GGUF ops with quantization options
+        ops = GGMLOps()
+        
+        if dequant_dtype in ("default", None):
+            ops.Linear.dequant_dtype = None
+        elif dequant_dtype == "target":
+            ops.Linear.dequant_dtype = dequant_dtype
+        else:
+            ops.Linear.dequant_dtype = getattr(torch, dequant_dtype)
+
+        if patch_dtype in ("default", None):
+            ops.Linear.patch_dtype = None
+        elif patch_dtype == "target":
+            ops.Linear.patch_dtype = patch_dtype
+        else:
+            ops.Linear.patch_dtype = getattr(torch, patch_dtype)
+
+        # Load GGUF model
+        model_path = folder_paths.get_full_path_or_raise("multitalk_gguf", model)
+        sd = gguf_sd_loader(model_path, handle_prefix="", return_arch=False)
+        
+        # Separate audio_proj components from main model
+        audio_proj_keys = [k for k in sd.keys() if "audio_proj" in k]
+        audio_proj_sd = {}
+        main_sd = {}
+        
+        for key, value in sd.items():
+            if key in audio_proj_keys:
+                # Remove audio_proj prefix if present
+                clean_key = key.replace("audio_proj.", "") if key.startswith("audio_proj.") else key
+                audio_proj_sd[clean_key] = value
+            else:
+                main_sd[key] = value
+
+        # MultiTalk model parameters
+        audio_window = 5
+        intermediate_dim = 512
+        output_dim = 768
+        context_tokens = 32
+        vae_scale = 4
+        norm_output_audio = True
+
+        # Create AudioProjModel with empty weights
+        with init_empty_weights():
+            multitalk_proj_model = AudioProjModel(
+                seq_len=audio_window,
+                seq_len_vf=audio_window+vae_scale-1,
+                intermediate_dim=intermediate_dim,
+                output_dim=output_dim,
+                context_tokens=context_tokens,
+                norm_output_audio=norm_output_audio,
+            )
+
+        # Load quantized weights with proper handling
+        for name, param in multitalk_proj_model.named_parameters():
+            if name in audio_proj_sd:
+                tensor_data = audio_proj_sd[name]
+                
+                # Handle quantized tensors
+                if is_quantized(tensor_data):
+                    # Dequantize if needed for certain operations
+                    if base_dtype in [torch.float8_e4m3fn]:
+                        # For FP8, dequantize to fp16 first
+                        tensor_data = dequantize_tensor(tensor_data, dtype=torch.float16)
+                    else:
+                        # Keep quantized for memory efficiency
+                        pass
+                
+                # Set tensor to model
+                set_module_tensor_to_device(
+                    multitalk_proj_model, 
+                    name, 
+                    device=offload_device, 
+                    dtype=base_dtype, 
+                    value=tensor_data
+                )
+            else:
+                log.warning(f"[MultiTalkGGUF] Missing weight for {name}")
+
+        # Apply custom ops to the model for GGUF support
+        multitalk_proj_model = self._apply_gguf_ops(multitalk_proj_model, ops)
+
+        multitalk = {
+            "proj_model": multitalk_proj_model,
+            "sd": main_sd,
+        }
+
+        return (multitalk,)
+    
+    def _apply_gguf_ops(self, model, ops):
+        """Apply GGUF custom operations to model layers"""
+        # Replace Linear layers with GGUF-compatible versions
+        for name, module in model.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                # Create GGUF-compatible linear layer
+                new_linear = ops.Linear(
+                    module.in_features,
+                    module.out_features,
+                    bias=module.bias is not None,
+                    device=module.weight.device,
+                    dtype=module.weight.dtype
+                )
+                
+                # Copy weights and bias
+                new_linear.weight = module.weight
+                if module.bias is not None:
+                    new_linear.bias = module.bias
+                
+                # Replace the module
+                parent = model
+                path = name.split('.')
+                for part in path[:-1]:
+                    parent = getattr(parent, part)
+                setattr(parent, path[-1], new_linear)
+        
+        return model
+
 
 def loudness_norm(audio_array, sr=16000, lufs=-23):
     try:
@@ -318,12 +508,14 @@ class WanVideoImageToVideoMultiTalk:
     
 NODE_CLASS_MAPPINGS = {
     "MultiTalkModelLoader": MultiTalkModelLoader,
+    "MultiTalkModelLoaderGGUF": MultiTalkModelLoaderGGUF,
     "MultiTalkWav2VecEmbeds": MultiTalkWav2VecEmbeds,
     "WanVideoImageToVideoMultiTalk": WanVideoImageToVideoMultiTalk    
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MultiTalkModelLoader": "MultiTalk Model Loader",
+    "MultiTalkModelLoaderGGUF": "MultiTalk Model Loader (GGUF)",
     "MultiTalkWav2VecEmbeds": "MultiTalk Wav2Vec Embeds",
     "WanVideoImageToVideoMultiTalk": "WanVideo Image To Video MultiTalk"
 }
