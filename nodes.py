@@ -1923,6 +1923,7 @@ class LoadWanVideoT5TextEncoderGGUF:
         # Convert GGUF T5 format (enc.blk.) to expected format
         elif any(key.startswith("enc.blk.") for key in sd.keys()):
             print("Converting GGUF T5 text encoder model to the expected format...")
+            print(f"Available GGUF keys sample: {[k for k in sorted(sd.keys()) if not k.startswith('enc.blk.')]}")
             converted_sd = {}
             
             for key, value in sd.items():
@@ -1955,13 +1956,24 @@ class LoadWanVideoT5TextEncoderGGUF:
                         new_key = f"blocks.{block_num}.norm2.weight"
                     else:
                         new_key = key
-                elif key == "output_norm.weight":
+                elif key in ["output_norm.weight", "enc_norm.weight", "encoder.norm.weight", "encoder_norm.weight"]:
                     new_key = "norm.weight"
-                elif key == "token_embd.weight":
+                elif key in ["token_embd.weight", "embed_tokens.weight", "embedding.weight"]:
                     new_key = "token_embedding.weight"
                 else:
                     new_key = key
                 converted_sd[new_key] = value
+            
+            # Add missing keys with dummy values if they don't exist but are expected
+            if "norm.weight" not in converted_sd:
+                print(f"Warning: 'norm.weight' not found in GGUF model, creating dummy norm layer")
+                # Find first block norm to determine dimensions
+                first_norm_key = next((k for k in converted_sd.keys() if "norm1.weight" in k), None)
+                if first_norm_key:
+                    dummy_norm = converted_sd[first_norm_key].clone()
+                    converted_sd["norm.weight"] = dummy_norm
+                    print(f"Created dummy norm.weight with shape {dummy_norm.shape}")
+            
             sd = converted_sd
 
         # Initialize T5 text encoder with potential GGUF quantization
