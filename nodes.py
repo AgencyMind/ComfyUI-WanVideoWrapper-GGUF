@@ -1846,7 +1846,7 @@ class LoadWanVideoT5TextEncoderGGUF:
 
         # Load state dict - use GGUF loader for .gguf files, regular loader for others
         if model_path.endswith(".gguf"):
-            sd, _ = gguf_wan_loader(model_path, handle_prefix=None, return_arch=True)
+            sd = gguf_wan_loader(model_path, handle_prefix=None, return_arch=False)
             print(f"Loaded GGUF T5 model: {model_name}")
         else:
             sd = load_torch_file(model_path, safe_load=True)
