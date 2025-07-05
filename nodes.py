@@ -1543,7 +1543,12 @@ class WanVideoModelLoaderGGUF:
                                 
                                 if reshaped_tensor is not None and reshaped_tensor.shape == expected_shape:
                                     print(f"Successfully reshaped tensor '{name}' from {dequantized_tensor.shape} to {expected_shape}")
+                                    # Clean up the original tensor to free VRAM
+                                    del dequantized_tensor
                                     dequantized_tensor = reshaped_tensor
+                                    # Force garbage collection to free VRAM immediately
+                                    gc.collect()
+                                    mm.soft_empty_cache()
                                 else:
                                     print(f"Could not reshape tensor '{name}' - skipping")
                                     skipped_params.append((name, param.shape, dtype_to_use))
@@ -1594,7 +1599,12 @@ class WanVideoModelLoaderGGUF:
                             
                             if reshaped_tensor is not None and reshaped_tensor.shape == expected_shape:
                                 print(f"Successfully reshaped regular tensor '{name}' from {tensor_data.shape} to {expected_shape}")
+                                # Clean up the original tensor to free VRAM
+                                del tensor_data
                                 tensor_data = reshaped_tensor
+                                # Force garbage collection to free VRAM immediately
+                                gc.collect()
+                                mm.soft_empty_cache()
                             else:
                                 print(f"Could not reshape regular tensor '{name}' - skipping")
                                 skipped_params.append((name, param.shape, dtype_to_use))
