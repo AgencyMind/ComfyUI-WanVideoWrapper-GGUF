@@ -1710,6 +1710,154 @@ class LoadWanVideoT5TextEncoder:
         
         return (text_encoder,)
     
+class LoadWanVideoT5TextEncoderGGUF:
+    @classmethod
+    def INPUT_TYPES(s):
+        if not GGUF_AVAILABLE:
+            return {
+                "required": {
+                    "model_name": (["GGUF_NOT_AVAILABLE"], {"tooltip": "GGUF support not available. Install ComfyUI-GGUF extension."}),
+                    "precision": (["fp32", "bf16"], {"default": "bf16"}),
+                },
+                "optional": {
+                    "load_device": (["main_device", "offload_device"], {"default": "offload_device"}),
+                    "quantization": (['disabled', 'fp8_e4m3fn'], {"default": 'disabled'}),
+                    "dequant_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
+                    "patch_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
+                }
+            }
+        
+        return {
+            "required": {
+                "model_name": (s.get_filename_list(), {"tooltip": "GGUF and safetensors T5 models from text_encoders folder"}),
+                "precision": (["fp32", "bf16"], {"default": "bf16"}),
+            },
+            "optional": {
+                "load_device": (["main_device", "offload_device"], {"default": "offload_device"}),
+                "quantization": (['disabled', 'fp8_e4m3fn'], {"default": 'disabled'}),
+                "dequant_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
+                "patch_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
+            }
+        }
+
+    RETURN_TYPES = ("WANTEXTENCODER",)
+    RETURN_NAMES = ("wan_t5_model", )
+    FUNCTION = "loadmodel"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Loads WanVideo T5 text encoder model with GGUF quantization support"
+
+    @classmethod
+    def get_filename_list(s):
+        files = []
+        files += folder_paths.get_filename_list("text_encoders")
+        files += folder_paths.get_filename_list("wanvideo_text_gguf")
+        return sorted(files)
+
+    def loadmodel(self, model_name, precision, load_device="offload_device", quantization="disabled", 
+                  dequant_dtype="default", patch_dtype="default"):
+        
+        if not GGUF_AVAILABLE:
+            raise RuntimeError("GGUF support not available. Install ComfyUI-GGUF extension.")
+        
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+        text_encoder_load_device = device if load_device == "main_device" else offload_device
+        tokenizer_path = os.path.join(script_directory, "configs", "T5_tokenizer")
+        dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
+
+        # Determine model path - check both regular and GGUF folders
+        model_path = None
+        try:
+            model_path = folder_paths.get_full_path("text_encoders", model_name)
+        except:
+            try:
+                model_path = folder_paths.get_full_path("wanvideo_text_gguf", model_name)
+            except:
+                raise ValueError(f"Model {model_name} not found in text_encoders or wanvideo_text_gguf folders")
+
+        # Load state dict - use GGUF loader for .gguf files, regular loader for others
+        if model_path.endswith(".gguf"):
+            sd, _ = gguf_wan_loader(model_path, handle_prefix=None, return_arch=True)
+            log.info(f"Loaded GGUF T5 model: {model_name}")
+        else:
+            sd = load_torch_file(model_path, safe_load=True)
+            if "scaled_fp8" in sd:
+                raise ValueError("Invalid T5 text encoder model, fp8 scaled is not supported by this node")
+
+        # Validate T5 model
+        if "token_embedding.weight" not in sd and "shared.weight" not in sd:
+            raise ValueError("Invalid T5 text encoder model, this node expects the 'umt5-xxl' model")
+
+        # Convert state dict keys from T5 format to the expected format (same as original)
+        if "shared.weight" in sd:
+            log.info("Converting T5 text encoder model to the expected format...")
+            converted_sd = {}
+            
+            for key, value in sd.items():
+                # Handle encoder block patterns
+                if key.startswith('encoder.block.'):
+                    parts = key.split('.')
+                    block_num = parts[2]
+                    
+                    # Self-attention components
+                    if 'layer.0.SelfAttention' in key:
+                        if key.endswith('.k.weight'):
+                            new_key = f"blocks.{block_num}.attn.k.weight"
+                        elif key.endswith('.o.weight'):
+                            new_key = f"blocks.{block_num}.attn.o.weight"
+                        elif key.endswith('.q.weight'):
+                            new_key = f"blocks.{block_num}.attn.q.weight"
+                        elif key.endswith('.v.weight'):
+                            new_key = f"blocks.{block_num}.attn.v.weight"
+                        elif 'relative_attention_bias' in key:
+                            new_key = f"blocks.{block_num}.pos_embedding.embedding.weight"
+                        else:
+                            new_key = key
+                    
+                    # Layer norms
+                    elif 'layer.0.layer_norm' in key:
+                        new_key = f"blocks.{block_num}.norm1.weight"
+                    elif 'layer.1.layer_norm' in key:
+                        new_key = f"blocks.{block_num}.norm2.weight"
+                    
+                    # Feed-forward components
+                    elif 'layer.1.DenseReluDense' in key:
+                        if 'wi_0' in key:
+                            new_key = f"blocks.{block_num}.ffn.gate.0.weight"
+                        elif 'wi_1' in key:
+                            new_key = f"blocks.{block_num}.ffn.fc1.weight"
+                        elif 'wo' in key:
+                            new_key = f"blocks.{block_num}.ffn.fc2.weight"
+                        else:
+                            new_key = key
+                    else:
+                        new_key = key
+                elif key == "shared.weight":
+                    new_key = "token_embedding.weight"
+                elif key == "encoder.final_layer_norm.weight":
+                    new_key = "norm.weight"
+                else:
+                    new_key = key
+                converted_sd[new_key] = value
+            sd = converted_sd
+
+        # Initialize T5 text encoder with potential GGUF quantization
+        T5_text_encoder = T5EncoderModel(
+            text_len=512,
+            dtype=dtype,
+            device=text_encoder_load_device,
+            state_dict=sd,
+            tokenizer_path=tokenizer_path,
+            quantization=quantization
+        )
+        
+        text_encoder = {
+            "model": T5_text_encoder,
+            "dtype": dtype,
+        }
+        
+        return (text_encoder,)
+
 class LoadWanVideoClipTextEncoder:
     @classmethod
     def INPUT_TYPES(s):
@@ -4831,6 +4979,7 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoModelLoaderGGUF": WanVideoModelLoaderGGUF,
     "WanVideoVAELoader": WanVideoVAELoader,
     "LoadWanVideoT5TextEncoder": LoadWanVideoT5TextEncoder,
+    "LoadWanVideoT5TextEncoderGGUF": LoadWanVideoT5TextEncoderGGUF,
     "WanVideoImageClipEncode": WanVideoImageClipEncode,#deprecated
     "WanVideoClipVisionEncode": WanVideoClipVisionEncode,
     "WanVideoImageToVideoEncode": WanVideoImageToVideoEncode,
@@ -4875,6 +5024,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoModelLoaderGGUF": "WanVideo Model Loader (GGUF)",
     "WanVideoVAELoader": "WanVideo VAE Loader",
     "LoadWanVideoT5TextEncoder": "Load WanVideo T5 TextEncoder",
+    "LoadWanVideoT5TextEncoderGGUF": "Load WanVideo T5 TextEncoder (GGUF)",
     "WanVideoImageClipEncode": "WanVideo ImageClip Encode (Deprecated)",
     "WanVideoClipVisionEncode": "WanVideo ClipVision Encode",
     "WanVideoImageToVideoEncode": "WanVideo ImageToVideo Encode",
