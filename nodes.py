@@ -1453,11 +1453,17 @@ class WanVideoModelLoaderGGUF:
                 
                 # Handle GGUF tensors specially - they may not support gradients
                 if hasattr(tensor_data, 'tensor_type'):
-                    # This is a quantized GGUF tensor - use it directly without trying to preserve gradients
-                    module = transformer
-                    for attr in name.split('.')[:-1]:
-                        module = getattr(module, attr)
-                    setattr(module, name.split('.')[-1], torch.nn.Parameter(tensor_data.to(transformer_load_device), requires_grad=False))
+                    # This is a quantized GGUF tensor
+                    if quantization == "disabled":
+                        # Dequantize to full precision when quantization is disabled
+                        dequantized_tensor = tensor_data.float()  # Convert to full precision
+                        set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=dequantized_tensor)
+                    else:
+                        # Use quantized tensor directly
+                        module = transformer
+                        for attr in name.split('.')[:-1]:
+                            module = getattr(module, attr)
+                        setattr(module, name.split('.')[-1], torch.nn.Parameter(tensor_data.to(transformer_load_device), requires_grad=False))
                 else:
                     # Regular tensor - use set_module_tensor_to_device normally
                     set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=tensor_data)
@@ -1967,12 +1973,20 @@ class LoadWanVideoT5TextEncoderGGUF:
             # Add missing keys with dummy values if they don't exist but are expected
             if "norm.weight" not in converted_sd:
                 print(f"Warning: 'norm.weight' not found in GGUF model, creating dummy norm layer")
-                # Find first block norm to determine dimensions
-                first_norm_key = next((k for k in converted_sd.keys() if "norm1.weight" in k), None)
-                if first_norm_key:
-                    dummy_norm = converted_sd[first_norm_key].clone()
+                # Detect embedding dimension from token_embedding.weight
+                if "token_embedding.weight" in converted_sd:
+                    embed_dim = converted_sd["token_embedding.weight"].shape[-1]
+                    print(f"Detected embedding dimension from token_embedding: {embed_dim}")
+                    dummy_norm = torch.ones(embed_dim, dtype=converted_sd["token_embedding.weight"].dtype)
                     converted_sd["norm.weight"] = dummy_norm
                     print(f"Created dummy norm.weight with shape {dummy_norm.shape}")
+                else:
+                    # Fallback: Find first block norm to determine dimensions
+                    first_norm_key = next((k for k in converted_sd.keys() if "norm1.weight" in k), None)
+                    if first_norm_key:
+                        dummy_norm = converted_sd[first_norm_key].clone()
+                        converted_sd["norm.weight"] = dummy_norm
+                        print(f"Created dummy norm.weight with shape {dummy_norm.shape} (fallback)")
             
             sd = converted_sd
 
