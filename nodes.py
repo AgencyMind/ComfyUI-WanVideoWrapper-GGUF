@@ -1456,11 +1456,28 @@ class WanVideoModelLoaderGGUF:
                     # This is a quantized GGUF tensor
                     if quantization == "disabled":
                         # Dequantize to full precision when quantization is disabled using proper GGUF dequantization
-                        try:
-                            from dequant import dequantize_tensor
-                            dequantized_tensor = dequantize_tensor(tensor_data, dtype=dtype_to_use)
-                        except ImportError:
-                            print("Warning: dequant module not available, falling back to tensor conversion")
+                        if GGUF_AVAILABLE:
+                            try:
+                                from .ComfyUI_GGUF.dequant import dequantize_tensor
+                                dequantized_tensor = dequantize_tensor(tensor_data, dtype=dtype_to_use)
+                            except ImportError:
+                                try:
+                                    # Alternative import path
+                                    import sys
+                                    import os
+                                    gguf_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ComfyUI-VideoHelperSuite", "ComfyUI-GGUF")
+                                    if os.path.exists(gguf_path):
+                                        sys.path.insert(0, gguf_path)
+                                        from dequant import dequantize_tensor
+                                        dequantized_tensor = dequantize_tensor(tensor_data, dtype=dtype_to_use)
+                                    else:
+                                        print("Warning: dequant module not available, falling back to tensor conversion")
+                                        dequantized_tensor = tensor_data.float()
+                                except ImportError:
+                                    print("Warning: dequant module not available, falling back to tensor conversion")
+                                    dequantized_tensor = tensor_data.float()
+                        else:
+                            print("Warning: GGUF not available, falling back to tensor conversion")
                             dequantized_tensor = tensor_data.float()
                         set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=dequantized_tensor)
                     else:
