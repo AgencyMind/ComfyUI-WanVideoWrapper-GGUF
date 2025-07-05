@@ -42,7 +42,7 @@ try:
     import comfy.ops
     GGUF_AVAILABLE = True
 except ImportError:
-    log("GGUF support not available. Install ComfyUI-GGUF extension for GGUF model support.")
+    print("GGUF support not available. Install ComfyUI-GGUF extension for GGUF model support.")
     GGUF_AVAILABLE = False
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
@@ -207,7 +207,7 @@ if GGUF_AVAILABLE:
             qtype_dict[tensor_type_str] = qtype_dict.get(tensor_type_str, 0) + 1
         
         # Log loaded tensor type counts
-        log(f"GGUF WanVideo model qtypes: {', '.join(f'{k} ({v})' for k, v in qtype_dict.items())}")
+        print(f"GGUF WanVideo model qtypes: {', '.join(f'{k} ({v})' for k, v in qtype_dict.items())}")
         
         # Mark largest quantized tensor for VRAM estimation
         qsd = {k: v for k, v in state_dict.items() if is_quantized(v)}
