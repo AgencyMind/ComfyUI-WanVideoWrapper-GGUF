@@ -1295,9 +1295,12 @@ class WanVideoModelLoaderGGUF:
         model_path = folder_paths.get_full_path_or_raise("wanvideo_gguf", model)
         
         # Debug: Check what prefixes exist in the GGUF file
-        reader = gguf.GGUFReader(model_path)
-        sample_tensor_names = [tensor.name for tensor in reader.tensors[:5]]
-        print(f"Sample GGUF tensor names: {sample_tensor_names}")
+        if GGUF_AVAILABLE:
+            reader = gguf.GGUFReader(model_path)
+            sample_tensor_names = [tensor.name for tensor in reader.tensors[:5]]
+            print(f"Sample GGUF tensor names: {sample_tensor_names}")
+        else:
+            raise RuntimeError("GGUF not available")
         
         # Try different prefixes based on what we find
         prefixes_to_try = ["model.diffusion_model.", "model.", ""]
@@ -1362,10 +1365,16 @@ class WanVideoModelLoaderGGUF:
         if not "patch_embedding.weight" in sd:
             raise ValueError("Invalid WanVideo model selected")
         
-        dim = sd["patch_embedding.weight"].shape[0]
-        in_channels = sd["patch_embedding.weight"].shape[1]
-        print(f"INFO: Detected model in_channels: {in_channels}")
-        ffn_dim = sd["blocks.0.ffn.0.bias"].shape[0]
+        patch_emb_shape = sd["patch_embedding.weight"].shape
+        print(f"DEBUG: patch_embedding.weight shape: {patch_emb_shape}")
+        
+        dim = patch_emb_shape[0]
+        in_channels = patch_emb_shape[1]
+        print(f"INFO: Detected model dim: {dim}, in_channels: {in_channels}")
+        
+        ffn_bias_shape = sd["blocks.0.ffn.0.bias"].shape
+        print(f"DEBUG: blocks.0.ffn.0.bias shape: {ffn_bias_shape}")
+        ffn_dim = ffn_bias_shape[0]
         model_type = wan_arch
         
         num_heads = 40 if dim == 5120 else 12
