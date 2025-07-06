@@ -320,7 +320,60 @@ class T5Encoder(nn.Module):
         self.apply(init_weights)
 
     def forward(self, ids, mask=None):
+        # Debug: Check embedding behavior for GGUF debugging
+        print(f"🔍 T5Encoder.forward() debugging:")
+        print(f"   └─ Input ids shape: {ids.shape}")
+        print(f"   └─ token_embedding.weight shape: {self.token_embedding.weight.shape}")
+        if hasattr(self.token_embedding.weight, 'tensor_type'):
+            print(f"   └─ token_embedding is quantized: {self.token_embedding.weight.tensor_type}")
+        else:
+            print(f"   └─ token_embedding is not quantized")
+        
         x = self.token_embedding(ids)
+        print(f"   └─ Embedding output shape: {x.shape}")
+        print(f"   └─ Expected output shape: [batch_size, seq_len, 4096]")
+        
+        # Verify dimensional correctness
+        if x.shape[-1] != 4096:
+            print(f"❌ DIMENSIONAL ERROR: Embedding output has {x.shape[-1]} dimensions, expected 4096")
+            print(f"   This suggests the embedding lookup is using the wrong dimension")
+            print(f"   token_embedding.weight should be [256384, 4096] for lookup to work correctly")
+            
+            # Check if weight transposition is needed
+            if self.token_embedding.weight.shape == torch.Size([4096, 256384]):
+                print(f"🔧 FIXING: token_embedding.weight needs transposition")
+                print(f"   Current shape: {self.token_embedding.weight.shape}")
+                # Force transpose for quantized tensors
+                if hasattr(self.token_embedding.weight, 'tensor_type'):
+                    # Create transposed quantized tensor
+                    transposed_data = self.token_embedding.weight.data.T.contiguous()
+                    # Import GGMLTensor from nodes.py
+                    import sys
+                    import os
+                    sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+                    from nodes import GGMLTensor
+                    transposed_tensor = GGMLTensor(
+                        transposed_data, 
+                        tensor_type=self.token_embedding.weight.tensor_type, 
+                        tensor_shape=torch.Size([256384, 4096])
+                    )
+                    self.token_embedding._parameters['weight'] = transposed_tensor
+                    print(f"   └─ Transposed to: {self.token_embedding.weight.shape}")
+                    
+                    # Retry embedding lookup
+                    x = self.token_embedding(ids)
+                    print(f"   └─ New embedding output shape: {x.shape}")
+                else:
+                    # Regular tensor transpose
+                    self.token_embedding.weight = nn.Parameter(self.token_embedding.weight.T.contiguous())
+                    print(f"   └─ Transposed to: {self.token_embedding.weight.shape}")
+                    
+                    # Retry embedding lookup
+                    x = self.token_embedding(ids)
+                    print(f"   └─ New embedding output shape: {x.shape}")
+        else:
+            print(f"✅ Embedding output dimensions correct: {x.shape[-1]}")
+        
         x = self.dropout(x)
         e = self.pos_embedding(x.size(1),
                                x.size(1)) if self.shared_pos else None
@@ -574,6 +627,18 @@ class T5EncoderModel:
             print(f"   └─ quantized: yes (type: {token_emb_weight.tensor_type})")
         else:
             print(f"   └─ quantized: no")
+        
+        # Critical check: Verify that assignment worked correctly
+        if hasattr(token_emb_weight, 'tensor_type') and actual_shape == torch.Size([256384, 4096]):
+            print(f"✅ GGUF quantized tensor assignment appears successful")
+        elif not hasattr(token_emb_weight, 'tensor_type') and actual_shape == torch.Size([256384, 4096]):
+            print(f"✅ Regular tensor assignment appears successful")
+        elif actual_shape == torch.Size([4096, 256384]):
+            print(f"❌ ASSIGNMENT FAILURE: Token embedding still has wrong shape after assignment")
+            print(f"   This indicates the direct parameter assignment didn't work")
+            print(f"   The embedding will produce {actual_shape[0]} dimensional outputs instead of {actual_shape[1]}")
+        else:
+            print(f"⚠️  Unknown tensor shape pattern: {actual_shape}")
         
         # Expected UMT5-XXL dimensions
         expected_vocab_size, expected_embedding_dim = 256384, 4096
