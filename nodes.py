@@ -2025,7 +2025,46 @@ class LoadWanVideoT5TextEncoderGGUF:
             
             sd = converted_sd
 
-        # Initialize T5 text encoder with potential GGUF quantization
+        # Fix tensor shapes for GGUF models - handle transposition issues
+        if model_path.endswith(".gguf"):
+            print("Checking and fixing tensor shapes for GGUF T5 model...")
+            fixed_sd = {}
+            for key, tensor in sd.items():
+                # Check if tensor needs transposition for compatibility
+                if hasattr(tensor, 'tensor_type'):
+                    # Quantized tensor - check if shape looks transposed
+                    if len(tensor.shape) == 2:
+                        # For weight matrices, if first dim is smaller, it might need transposition
+                        if tensor.shape[0] < tensor.shape[1] and "weight" in key:
+                            print(f"Transposing quantized tensor {key}: {tensor.shape} -> {tensor.shape[::-1]}")
+                            # For quantized tensors, we need to transpose the underlying data
+                            # but preserve the quantization wrapper
+                            try:
+                                # Create new GGMLTensor with transposed data
+                                transposed_data = tensor.data.T.contiguous()
+                                transposed_tensor = GGMLTensor(
+                                    transposed_data, 
+                                    tensor_type=tensor.tensor_type, 
+                                    tensor_shape=torch.Size(tensor.shape[::-1])
+                                )
+                                fixed_sd[key] = transposed_tensor
+                            except Exception as e:
+                                print(f"Warning: Could not transpose quantized tensor {key}, using as-is: {e}")
+                                fixed_sd[key] = tensor
+                        else:
+                            fixed_sd[key] = tensor
+                    else:
+                        fixed_sd[key] = tensor
+                else:
+                    # Regular tensor - standard transposition
+                    if len(tensor.shape) == 2 and tensor.shape[0] < tensor.shape[1] and "weight" in key:
+                        print(f"Transposing tensor {key}: {tensor.shape} -> {tensor.shape[::-1]}")
+                        fixed_sd[key] = tensor.T.contiguous()
+                    else:
+                        fixed_sd[key] = tensor
+            sd = fixed_sd
+
+        # Initialize T5 text encoder with shape-corrected state dict
         T5_text_encoder = T5EncoderModel(
             text_len=512,
             dtype=dtype,
