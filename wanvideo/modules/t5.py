@@ -502,8 +502,17 @@ class T5EncoderModel:
 
         params_to_keep = {'norm', 'pos_embedding', 'token_embedding'}
         for name, param in model.named_parameters():
-            dtype_to_use = dtype if any(keyword in name for keyword in params_to_keep) else cast_dtype
-            set_module_tensor_to_device(model, name, device=device, dtype=dtype_to_use, value=state_dict[name])
+            if name in state_dict:
+                tensor_data = state_dict[name]
+                
+                # Critical: preserve quantization for quantized tensors (same pattern as WanVideo loader)
+                if hasattr(tensor_data, 'tensor_type'):
+                    # Quantized tensor - preserve quantization (no dtype conversion)
+                    set_module_tensor_to_device(model, name, device=device, value=tensor_data)
+                else:
+                    # Regular tensor - apply dtype conversion
+                    dtype_to_use = dtype if any(keyword in name for keyword in params_to_keep) else cast_dtype
+                    set_module_tensor_to_device(model, name, device=device, dtype=dtype_to_use, value=tensor_data)
         del state_dict
         self.model = model
         self.tokenizer = HuggingfaceTokenizer(

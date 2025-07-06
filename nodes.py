@@ -2025,43 +2025,46 @@ class LoadWanVideoT5TextEncoderGGUF:
             
             sd = converted_sd
 
-        # Fix tensor shapes for GGUF models - handle transposition issues
+        # Fix tensor shapes for GGUF models - handle transposition issues  
         if model_path.endswith(".gguf"):
             print("Checking and fixing tensor shapes for GGUF T5 model...")
             fixed_sd = {}
             for key, tensor in sd.items():
-                # Check if tensor needs transposition for compatibility
-                if hasattr(tensor, 'tensor_type'):
-                    # Quantized tensor - check if shape looks transposed
-                    if len(tensor.shape) == 2:
-                        # For weight matrices, if first dim is smaller, it might need transposition
-                        if tensor.shape[0] < tensor.shape[1] and "weight" in key:
-                            print(f"Transposing quantized tensor {key}: {tensor.shape} -> {tensor.shape[::-1]}")
-                            # For quantized tensors, we need to transpose the underlying data
-                            # but preserve the quantization wrapper
-                            try:
-                                # Create new GGMLTensor with transposed data
-                                transposed_data = tensor.data.T.contiguous()
-                                transposed_tensor = GGMLTensor(
-                                    transposed_data, 
-                                    tensor_type=tensor.tensor_type, 
-                                    tensor_shape=torch.Size(tensor.shape[::-1])
-                                )
-                                fixed_sd[key] = transposed_tensor
-                            except Exception as e:
-                                print(f"Warning: Could not transpose quantized tensor {key}, using as-is: {e}")
-                                fixed_sd[key] = tensor
-                        else:
+                # Apply intelligent transposition based on T5 architecture expectations
+                # UMT5-XXL: dim=4096, dim_ffn=10240
+                # Expected shapes:
+                # - token_embedding: [vocab_size, dim] = [256384, 4096] 
+                # - attention weights: [dim, dim] = [4096, 4096]
+                # - ffn.gate.0, ffn.fc1: [dim, dim_ffn] = [4096, 10240]  
+                # - ffn.fc2: [dim_ffn, dim] = [10240, 4096]
+                
+                needs_transpose = False
+                if "token_embedding.weight" in key and tensor.shape == (4096, 256384):
+                    needs_transpose = True  # Should be [256384, 4096]
+                elif "ffn.fc2.weight" in key and tensor.shape == (4096, 10240):
+                    needs_transpose = True  # Should be [10240, 4096]
+                # Note: ffn.gate.0 and ffn.fc1 should stay [4096, 10240] - don't transpose
+                
+                if needs_transpose:
+                    if hasattr(tensor, 'tensor_type'):
+                        print(f"Transposing quantized tensor {key}: {tensor.shape} -> {tensor.shape[::-1]}")
+                        try:
+                            # Create new GGMLTensor with transposed data
+                            transposed_data = tensor.data.T.contiguous()
+                            transposed_tensor = GGMLTensor(
+                                transposed_data, 
+                                tensor_type=tensor.tensor_type, 
+                                tensor_shape=torch.Size(tensor.shape[::-1])
+                            )
+                            fixed_sd[key] = transposed_tensor
+                        except Exception as e:
+                            print(f"Warning: Could not transpose quantized tensor {key}, using as-is: {e}")
                             fixed_sd[key] = tensor
                     else:
-                        fixed_sd[key] = tensor
-                else:
-                    # Regular tensor - standard transposition
-                    if len(tensor.shape) == 2 and tensor.shape[0] < tensor.shape[1] and "weight" in key:
                         print(f"Transposing tensor {key}: {tensor.shape} -> {tensor.shape[::-1]}")
                         fixed_sd[key] = tensor.T.contiguous()
-                    else:
-                        fixed_sd[key] = tensor
+                else:
+                    fixed_sd[key] = tensor
             sd = fixed_sd
 
         # Initialize T5 text encoder with shape-corrected state dict
