@@ -535,6 +535,23 @@ class T5EncoderModel:
                     dtype_to_use = dtype if any(keyword in name for keyword in params_to_keep) else cast_dtype
                     set_module_tensor_to_device(model, name, device=device, dtype=dtype_to_use, value=tensor_data)
         del state_dict
+        
+        # Critical validation: Ensure token embedding has correct shape after loading
+        token_emb_weight = model.token_embedding.weight
+        expected_shape = torch.Size([256384, 4096])  # [vocab_size, embedding_dim]
+        actual_shape = token_emb_weight.shape
+        
+        if actual_shape != expected_shape:
+            print(f"❌ CRITICAL ERROR: Token embedding shape validation failed!")
+            print(f"Expected: {expected_shape}")
+            print(f"Actual: {actual_shape}")
+            print(f"This indicates the GGUF tensor transposition failed during loading.")
+            raise RuntimeError(f"Token embedding shape mismatch: expected {expected_shape}, got {actual_shape}. "
+                             f"This suggests the GGUF transposition logic failed to properly convert "
+                             f"[4096, 256384] → [256384, 4096] during model loading.")
+        else:
+            print(f"✅ Token embedding shape validation passed: {actual_shape}")
+        
         self.model = model
         self.tokenizer = HuggingfaceTokenizer(
             name=tokenizer_path, seq_len=text_len, clean='whitespace')
