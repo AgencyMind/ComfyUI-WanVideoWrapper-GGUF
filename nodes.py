@@ -1892,6 +1892,40 @@ class LoadWanVideoT5TextEncoderGGUF:
         if model_path.endswith(".gguf"):
             sd = gguf_wan_loader(model_path, handle_prefix=None, return_arch=False)
             print(f"Loaded GGUF T5 model: {model_name}")
+            
+            # CRITICAL: Verify raw GGUF model dimensions before any processing
+            print(f"=== RAW GGUF MODEL VERIFICATION ===")
+            print(f"Model file: {model_name}")
+            if "token_embd.weight" in sd:
+                raw_shape = sd["token_embd.weight"].shape
+                print(f"Raw token_embd.weight shape: {raw_shape}")
+                print(f"Raw vocab_size: {raw_shape[0]}, embedding_dim: {raw_shape[1]}")
+                if raw_shape[0] == 256384 and raw_shape[1] == 4096:
+                    print("✅ Correct WanVideo UMT5-XXL dimensions detected")
+                elif raw_shape[0] == 3360:
+                    error_msg = (f"❌ INCOMPATIBLE GGUF MODEL: {model_name}\n"
+                               f"This model has vocab_size={raw_shape[0]} which is incompatible with WanVideo.\n"
+                               f"WanVideo requires UMT5-XXL with vocab_size=256384 and embedding_dim=4096.\n"
+                               f"Current model dimensions: [{raw_shape[0]}, {raw_shape[1]}]\n"
+                               f"Expected dimensions: [256384, 4096]\n"
+                               f"Please use a WanVideo-compatible UMT5-XXL GGUF model (e.g., chatpig/umt5xxl-encoder-gguf).")
+                    print(error_msg)
+                    raise ValueError(error_msg)
+                else:
+                    error_msg = (f"❌ UNKNOWN GGUF MODEL DIMENSIONS: {model_name}\n"
+                               f"Model dimensions: [{raw_shape[0]}, {raw_shape[1]}]\n"
+                               f"WanVideo requires UMT5-XXL with dimensions: [256384, 4096]\n"
+                               f"Please verify this is a WanVideo-compatible UMT5-XXL GGUF model.")
+                    print(error_msg)
+                    raise ValueError(error_msg)
+            else:
+                error_msg = (f"❌ INVALID GGUF MODEL: {model_name}\n"
+                           f"Model does not contain 'token_embd.weight' tensor.\n"
+                           f"Available keys: {list(sd.keys())[:10]}...\n"
+                           f"Please use a valid UMT5-XXL GGUF model.")
+                print(error_msg)
+                raise ValueError(error_msg)
+            print(f"=== END RAW MODEL VERIFICATION ===")
         else:
             sd = load_torch_file(model_path, safe_load=True)
             if "scaled_fp8" in sd:
