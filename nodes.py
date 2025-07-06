@@ -2035,19 +2035,20 @@ class LoadWanVideoT5TextEncoderGGUF:
                 # Expected shapes in T5EncoderModel:
                 # - token_embedding: [vocab_size, dim] = [256384, 4096] 
                 # - attention weights: [dim, dim] = [4096, 4096] (no transpose needed)
-                # - ALL ffn layers: [dim_ffn, dim] = [10240, 4096] (PyTorch Linear convention)
-                # GGUF stores ffn as [4096, 10240] so ALL need transposition
+                # - ffn.gate/fc1: [dim_ffn, dim] = [10240, 4096] (Linear(4096, 10240))
+                # - ffn.fc2: [dim, dim_ffn] = [4096, 10240] (Linear(10240, 4096))  
+                # GGUF storage vs T5 expectations require selective transposition
                 
                 needs_transpose = False
                 if "token_embedding.weight" in key and tensor.shape == (4096, 256384):
                     needs_transpose = True  # Should be [256384, 4096]
                 elif "ffn.gate.0.weight" in key and tensor.shape == (4096, 10240):
-                    needs_transpose = True  # Should be [10240, 4096] 
+                    needs_transpose = True  # Should be [10240, 4096] (Linear(4096, 10240))
                 elif "ffn.fc1.weight" in key and tensor.shape == (4096, 10240):
-                    needs_transpose = True  # Should be [10240, 4096]
-                elif "ffn.fc2.weight" in key and tensor.shape == (4096, 10240):
-                    needs_transpose = True  # Should be [10240, 4096]
-                # All ffn layers need transposition from GGUF [4096, 10240] to T5 expected [10240, 4096]
+                    needs_transpose = True  # Should be [10240, 4096] (Linear(4096, 10240))
+                elif "ffn.fc2.weight" in key and tensor.shape == (10240, 4096):
+                    needs_transpose = True  # Should be [4096, 10240] (Linear(10240, 4096))
+                # NOTE: ffn.fc2 expects OPPOSITE shape from gate/fc1 due to different Linear layer dimensions!
                 
                 if needs_transpose:
                     if hasattr(tensor, 'tensor_type'):

@@ -505,6 +505,13 @@ class T5EncoderModel:
             if name in state_dict:
                 tensor_data = state_dict[name]
                 
+                # Debug: Which tensor is causing the new error?
+                print(f"Setting parameter {name}: model expects {param.shape}, tensor has {tensor_data.shape}")
+                
+                # Debug: Also check if this is an ffn layer
+                if "ffn" in name:
+                    print(f"  --> FFN layer detected: {name}")
+                
                 # Critical: preserve quantization for quantized tensors (same pattern as WanVideo loader)
                 if hasattr(tensor_data, 'tensor_type'):
                     # Quantized tensor - preserve quantization (no dtype conversion)
