@@ -177,8 +177,12 @@ if GGUF_AVAILABLE:
 
         # Detect architecture
         arch_str = get_field(reader, "general.architecture", str)
-        if arch_str not in ["wan", None]:
-            print(f"Warning: Expected 'wan' architecture, got '{arch_str}', attempting to continue...")
+        if return_arch and arch_str not in ["wan", None]:
+            print(f"Warning: Expected 'wan' architecture for WanVideo model, got '{arch_str}', attempting to continue...")
+        elif not return_arch and arch_str == "t5encoder":
+            pass  # Expected for T5 text encoders
+        elif not return_arch and arch_str not in ["t5encoder", None]:
+            print(f"Note: Loading GGUF model with architecture '{arch_str}' as text encoder")
         
         # Load state dict
         state_dict = {}
@@ -1997,7 +2001,7 @@ class LoadWanVideoT5TextEncoderGGUF:
                         new_key = f"blocks.{block_num}.norm2.weight"
                     else:
                         new_key = key
-                elif key in ["output_norm.weight", "enc_norm.weight", "encoder.norm.weight", "encoder_norm.weight"]:
+                elif key in ["output_norm.weight", "enc.output_norm.weight", "enc_norm.weight", "encoder.norm.weight", "encoder_norm.weight"]:
                     new_key = "norm.weight"
                 elif key in ["token_embd.weight", "embed_tokens.weight", "embedding.weight"]:
                     new_key = "token_embedding.weight"
@@ -2005,23 +2009,14 @@ class LoadWanVideoT5TextEncoderGGUF:
                     new_key = key
                 converted_sd[new_key] = value
             
-            # Add missing keys with dummy values if they don't exist but are expected
-            if "norm.weight" not in converted_sd:
-                print(f"Warning: 'norm.weight' not found in GGUF model, creating dummy norm layer")
-                # Detect embedding dimension from token_embedding.weight
-                if "token_embedding.weight" in converted_sd:
-                    embed_dim = converted_sd["token_embedding.weight"].shape[-1]
-                    print(f"Detected embedding dimension from token_embedding: {embed_dim}")
-                    dummy_norm = torch.ones(embed_dim, dtype=converted_sd["token_embedding.weight"].dtype)
-                    converted_sd["norm.weight"] = dummy_norm
-                    print(f"Created dummy norm.weight with shape {dummy_norm.shape}")
-                else:
-                    # Fallback: Find first block norm to determine dimensions
-                    first_norm_key = next((k for k in converted_sd.keys() if "norm1.weight" in k), None)
-                    if first_norm_key:
-                        dummy_norm = converted_sd[first_norm_key].clone()
-                        converted_sd["norm.weight"] = dummy_norm
-                        print(f"Created dummy norm.weight with shape {dummy_norm.shape} (fallback)")
+            # Validate that essential weights are present after conversion
+            essential_keys = ["norm.weight", "token_embedding.weight"]
+            missing_keys = [key for key in essential_keys if key not in converted_sd]
+            if missing_keys:
+                available_keys = list(converted_sd.keys())[:10]  # Show first 10 for debugging
+                raise ValueError(f"GGUF model missing essential keys: {missing_keys}. "
+                               f"Available keys (sample): {available_keys}. "
+                               f"Check model conversion or key mapping.")
             
             sd = converted_sd
 
