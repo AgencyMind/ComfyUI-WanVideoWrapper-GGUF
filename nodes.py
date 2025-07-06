@@ -2044,8 +2044,8 @@ class LoadWanVideoT5TextEncoderGGUF:
                 # GGUF storage vs T5 expectations require selective transposition
                 
                 needs_transpose = False
-                if "token_embedding.weight" in key and tensor.shape == (4096, 256384):
-                    needs_transpose = True  # Should be [256384, 4096]
+                # NOTE: token_embedding.weight should NOT be transposed - GGUF format is correct
+                # GGUF: [4096, 256384] = [embedding_dim, vocab_size] which is correct for this T5 implementation
                 elif "ffn.gate.0.weight" in key and tensor.shape == (4096, 10240):
                     needs_transpose = True  # Should be [10240, 4096] (Linear(4096, 10240))
                 elif "ffn.fc1.weight" in key and tensor.shape == (4096, 10240):
