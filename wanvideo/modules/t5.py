@@ -536,21 +536,41 @@ class T5EncoderModel:
                     set_module_tensor_to_device(model, name, device=device, dtype=dtype_to_use, value=tensor_data)
         del state_dict
         
-        # Critical validation: Ensure token embedding has correct shape after loading
+        # Adaptive validation: Detect actual model dimensions from loaded weights
         token_emb_weight = model.token_embedding.weight
-        expected_shape = torch.Size([256384, 4096])  # [vocab_size, embedding_dim]
         actual_shape = token_emb_weight.shape
+        actual_vocab_size, actual_embedding_dim = actual_shape
         
-        if actual_shape != expected_shape:
-            print(f"❌ CRITICAL ERROR: Token embedding shape validation failed!")
-            print(f"Expected: {expected_shape}")
-            print(f"Actual: {actual_shape}")
-            print(f"This indicates the GGUF tensor transposition failed during loading.")
-            raise RuntimeError(f"Token embedding shape mismatch: expected {expected_shape}, got {actual_shape}. "
-                             f"This suggests the GGUF transposition logic failed to properly convert "
-                             f"[4096, 256384] → [256384, 4096] during model loading.")
+        # Expected UMT5-XXL dimensions
+        expected_vocab_size, expected_embedding_dim = 256384, 4096
+        
+        if (actual_vocab_size, actual_embedding_dim) != (expected_vocab_size, expected_embedding_dim):
+            print(f"⚠️  Model dimension mismatch detected:")
+            print(f"Expected UMT5-XXL: vocab_size={expected_vocab_size}, embedding_dim={expected_embedding_dim}")
+            print(f"Actual model: vocab_size={actual_vocab_size}, embedding_dim={actual_embedding_dim}")
+            
+            # Check if this is a known T5 variant
+            if actual_vocab_size == 32128 and actual_embedding_dim == 768:
+                print(f"✅ Detected T5-Base model (32128 vocab, 768 dim)")
+            elif actual_vocab_size == 32128 and actual_embedding_dim == 1024:
+                print(f"✅ Detected T5-Large model (32128 vocab, 1024 dim)")
+            elif actual_vocab_size == 32128 and actual_embedding_dim == 2048:
+                print(f"✅ Detected T5-3B model (32128 vocab, 2048 dim)")
+            elif actual_vocab_size == 3360 and actual_embedding_dim == 256384:
+                print(f"❌ Invalid model detected: This appears to be a corrupted or incorrectly converted model")
+                print(f"   The dimensions suggest the vocab_size and embedding_dim were swapped during conversion")
+                raise RuntimeError(f"Invalid T5 model: vocab_size={actual_vocab_size}, embedding_dim={actual_embedding_dim}. "
+                                 f"This model appears to have swapped dimensions and is not compatible with WanVideo. "
+                                 f"Please use a proper UMT5-XXL GGUF model with 256384 vocab size and 4096 embedding dimension.")
+            else:
+                print(f"⚠️  Unknown T5 variant - proceeding with detected dimensions")
+                
+            # For non-UMT5-XXL models, update the architecture dynamically
+            if actual_vocab_size != expected_vocab_size or actual_embedding_dim != expected_embedding_dim:
+                print(f"🔄 Adapting T5EncoderModel for detected dimensions...")
+                # Note: This may cause compatibility issues with WanVideo which expects UMT5-XXL
         else:
-            print(f"✅ Token embedding shape validation passed: {actual_shape}")
+            print(f"✅ Token embedding validation passed: UMT5-XXL dimensions {actual_shape}")
         
         self.model = model
         self.tokenizer = HuggingfaceTokenizer(

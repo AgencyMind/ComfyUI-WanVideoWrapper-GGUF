@@ -2116,6 +2116,19 @@ class LoadWanVideoT5TextEncoderGGUF:
 
         # Initialize T5 text encoder with shape-corrected state dict
         print("=== Attempting T5 Model Creation ===")
+        
+        # Critical debugging: Verify token_embedding.weight shape in state dict before model creation
+        if "token_embedding.weight" in sd:
+            token_tensor = sd["token_embedding.weight"]
+            print(f"🔍 Final state dict verification:")
+            print(f"   └─ token_embedding.weight shape: {token_tensor.shape}")
+            if hasattr(token_tensor, 'tensor_type'):
+                print(f"   └─ quantized: yes (type: {token_tensor.tensor_type})")
+            else:
+                print(f"   └─ quantized: no")
+        else:
+            print("❌ token_embedding.weight not found in state dict!")
+            
         try:
             T5_text_encoder = T5EncoderModel(
                 text_len=512,
