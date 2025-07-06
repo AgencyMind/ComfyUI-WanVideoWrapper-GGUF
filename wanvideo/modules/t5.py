@@ -530,6 +530,13 @@ class T5EncoderModel:
                 if hasattr(tensor_data, 'tensor_type'):
                     # Quantized tensor - preserve quantization (no dtype conversion)
                     set_module_tensor_to_device(model, name, device=device, value=tensor_data)
+                    # Verify assignment for token_embedding specifically
+                    if name == "token_embedding.weight":
+                        assigned_tensor = getattr(model.token_embedding, 'weight')
+                        print(f"🔍 Assignment verification for {name}:")
+                        print(f"   └─ Original tensor shape: {tensor_data.shape}")
+                        print(f"   └─ Assigned tensor shape: {assigned_tensor.shape}")
+                        print(f"   └─ Assignment successful: {assigned_tensor.shape == tensor_data.shape}")
                 else:
                     # Regular tensor - apply dtype conversion
                     dtype_to_use = dtype if any(keyword in name for keyword in params_to_keep) else cast_dtype
@@ -540,6 +547,16 @@ class T5EncoderModel:
         token_emb_weight = model.token_embedding.weight
         actual_shape = token_emb_weight.shape
         actual_vocab_size, actual_embedding_dim = actual_shape
+        
+        # Debug: Print tensor properties for GGUF debugging
+        print(f"🔍 T5EncoderModel validation debug:")
+        print(f"   └─ token_embedding.weight.shape: {actual_shape}")
+        print(f"   └─ tensor dtype: {token_emb_weight.dtype}")
+        print(f"   └─ tensor device: {token_emb_weight.device}")
+        if hasattr(token_emb_weight, 'tensor_type'):
+            print(f"   └─ quantized: yes (type: {token_emb_weight.tensor_type})")
+        else:
+            print(f"   └─ quantized: no")
         
         # Expected UMT5-XXL dimensions
         expected_vocab_size, expected_embedding_dim = 256384, 4096
