@@ -1969,6 +1969,15 @@ class LoadWanVideoT5TextEncoderGGUF:
         elif any(key.startswith("enc.blk.") for key in sd.keys()):
             print("Converting GGUF T5 text encoder model to the expected format...")
             print(f"Available GGUF keys sample: {[k for k in sorted(sd.keys()) if not k.startswith('enc.blk.')]}")
+            
+            # Debug: Check shapes of norm-related tensors
+            if 'enc.output_norm.weight' in sd:
+                print(f"enc.output_norm.weight shape: {sd['enc.output_norm.weight'].shape}")
+            
+            norm_keys = [k for k in sd.keys() if 'norm' in k.lower()]
+            print(f"All norm-related keys: {norm_keys}")
+            for key in norm_keys:
+                print(f"  {key}: shape {sd[key].shape}")
             converted_sd = {}
             
             for key, value in sd.items():
