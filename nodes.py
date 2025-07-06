@@ -2048,6 +2048,8 @@ class LoadWanVideoT5TextEncoderGGUF:
                     needs_transpose = True  # Should be [10240, 4096] (Linear(4096, 10240))
                 elif "ffn.fc2.weight" in key and tensor.shape == (10240, 4096):
                     needs_transpose = True  # Should be [4096, 10240] (Linear(10240, 4096))
+                elif "pos_embedding.embedding.weight" in key and tensor.shape == (64, 32):
+                    needs_transpose = True  # Should be [32, 64] (T5RelativeEmbedding)
                 # NOTE: ffn.fc2 expects OPPOSITE shape from gate/fc1 due to different Linear layer dimensions!
                 
                 if needs_transpose:
