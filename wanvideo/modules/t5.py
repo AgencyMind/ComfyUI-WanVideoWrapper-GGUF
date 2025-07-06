@@ -505,9 +505,6 @@ class T5EncoderModel:
             if name in state_dict:
                 tensor_data = state_dict[name]
                 
-                # Debug logging to identify problematic tensor
-                print(f"Loading parameter {name}: model expects {param.shape}, tensor has {tensor_data.shape}")
-                
                 # Critical: preserve quantization for quantized tensors (same pattern as WanVideo loader)
                 if hasattr(tensor_data, 'tensor_type'):
                     # Quantized tensor - preserve quantization (no dtype conversion)

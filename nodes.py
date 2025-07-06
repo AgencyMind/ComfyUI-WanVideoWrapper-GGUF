@@ -2032,18 +2032,22 @@ class LoadWanVideoT5TextEncoderGGUF:
             for key, tensor in sd.items():
                 # Apply intelligent transposition based on T5 architecture expectations
                 # UMT5-XXL: dim=4096, dim_ffn=10240
-                # Expected shapes:
+                # Expected shapes in T5EncoderModel:
                 # - token_embedding: [vocab_size, dim] = [256384, 4096] 
-                # - attention weights: [dim, dim] = [4096, 4096]
-                # - ffn.gate.0, ffn.fc1: [dim, dim_ffn] = [4096, 10240]  
-                # - ffn.fc2: [dim_ffn, dim] = [10240, 4096]
+                # - attention weights: [dim, dim] = [4096, 4096] (no transpose needed)
+                # - ALL ffn layers: [dim_ffn, dim] = [10240, 4096] (PyTorch Linear convention)
+                # GGUF stores ffn as [4096, 10240] so ALL need transposition
                 
                 needs_transpose = False
                 if "token_embedding.weight" in key and tensor.shape == (4096, 256384):
                     needs_transpose = True  # Should be [256384, 4096]
+                elif "ffn.gate.0.weight" in key and tensor.shape == (4096, 10240):
+                    needs_transpose = True  # Should be [10240, 4096] 
+                elif "ffn.fc1.weight" in key and tensor.shape == (4096, 10240):
+                    needs_transpose = True  # Should be [10240, 4096]
                 elif "ffn.fc2.weight" in key and tensor.shape == (4096, 10240):
                     needs_transpose = True  # Should be [10240, 4096]
-                # Note: ffn.gate.0 and ffn.fc1 should stay [4096, 10240] - don't transpose
+                # All ffn layers need transposition from GGUF [4096, 10240] to T5 expected [10240, 4096]
                 
                 if needs_transpose:
                     if hasattr(tensor, 'tensor_type'):
