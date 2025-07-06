@@ -528,15 +528,32 @@ class T5EncoderModel:
                 
                 # Critical: preserve quantization for quantized tensors (same pattern as WanVideo loader)
                 if hasattr(tensor_data, 'tensor_type'):
-                    # Quantized tensor - preserve quantization (no dtype conversion)
-                    set_module_tensor_to_device(model, name, device=device, value=tensor_data)
-                    # Verify assignment for token_embedding specifically
-                    if name == "token_embedding.weight":
-                        assigned_tensor = getattr(model.token_embedding, 'weight')
-                        print(f"🔍 Assignment verification for {name}:")
-                        print(f"   └─ Original tensor shape: {tensor_data.shape}")
-                        print(f"   └─ Assigned tensor shape: {assigned_tensor.shape}")
-                        print(f"   └─ Assignment successful: {assigned_tensor.shape == tensor_data.shape}")
+                    # Quantized tensor - use direct assignment instead of set_module_tensor_to_device
+                    # which doesn't handle quantized tensors properly
+                    try:
+                        # Navigate to the actual parameter and assign directly
+                        module_path = name.split('.')
+                        target_module = model
+                        for path_part in module_path[:-1]:
+                            target_module = getattr(target_module, path_part)
+                        
+                        # Direct parameter assignment for quantized tensors
+                        param_name = module_path[-1]
+                        target_module._parameters[param_name] = tensor_data
+                        
+                        print(f"✅ Direct quantized assignment: {name}")
+                        
+                        # Verify assignment for token_embedding specifically
+                        if name == "token_embedding.weight":
+                            assigned_tensor = getattr(model.token_embedding, 'weight')
+                            print(f"🔍 Assignment verification for {name}:")
+                            print(f"   └─ Original tensor shape: {tensor_data.shape}")
+                            print(f"   └─ Assigned tensor shape: {assigned_tensor.shape}")
+                            print(f"   └─ Assignment successful: {assigned_tensor.shape == tensor_data.shape}")
+                    except Exception as e:
+                        print(f"❌ Direct assignment failed for {name}: {e}")
+                        # Fallback to original method
+                        set_module_tensor_to_device(model, name, device=device, value=tensor_data)
                 else:
                     # Regular tensor - apply dtype conversion
                     dtype_to_use = dtype if any(keyword in name for keyword in params_to_keep) else cast_dtype
