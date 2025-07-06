@@ -2062,14 +2062,8 @@ class LoadWanVideoT5TextEncoderGGUF:
                 transpose_reason = ""
                 
                 if "token_embedding.weight" in key and tensor.shape == (4096, 256384):
-                    # Only transpose if not quantized - quantized transposition may break runtime
-                    if not hasattr(tensor, 'tensor_type'):
-                        needs_transpose = True
-                        transpose_reason = "Model expects [256384, 4096] but GGUF has [4096, 256384]"
-                    else:
-                        print(f"DECISION: Skipping transposition of quantized token_embedding.weight to avoid runtime issues")
-                        print(f"  └─ This means shape mismatch will occur during loading")
-                        skip_count += 1
+                    needs_transpose = True
+                    transpose_reason = "Model expects [256384, 4096] but GGUF has [4096, 256384] (REQUIRED for loading)"
                 elif "ffn.gate.0.weight" in key and tensor.shape == (4096, 10240):
                     needs_transpose = True
                     transpose_reason = "FFN gate layer: GGUF [4096, 10240] → Expected [10240, 4096] (Linear(4096, 10240))"
