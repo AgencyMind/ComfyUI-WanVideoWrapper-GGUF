@@ -351,20 +351,36 @@ class T5Encoder(nn.Module):
                 # Manual embedding lookup using F.embedding with proper indexing
                 import torch.nn.functional as F
                 
-                # For quantized tensors, we need to ensure proper indexing
-                # The weight should be [vocab_size, embedding_dim] = [256384, 4096]
-                if weight.shape == torch.Size([256384, 4096]):
-                    # Correct shape - use direct embedding
-                    x = F.embedding(ids, weight)
-                    print(f"   └─ Direct quantized embedding result: {x.shape}")
-                elif weight.shape == torch.Size([4096, 256384]):
-                    # Wrong shape - transpose and use
-                    print(f"   └─ Transposing weight for embedding lookup")
-                    weight_transposed = weight.T
-                    x = F.embedding(ids, weight_transposed)
-                    print(f"   └─ Transposed quantized embedding result: {x.shape}")
-                else:
-                    print(f"   └─ Unexpected weight shape: {weight.shape}")
+                # CRITICAL: Quantized tensors need dequantization for proper embedding lookup
+                print(f"   └─ Attempting dequantization for proper embedding lookup")
+                
+                try:
+                    # Method 1: Try .dequantize() if available
+                    if hasattr(weight, 'dequantize'):
+                        weight_dequant = weight.dequantize()
+                        print(f"   └─ Dequantized using .dequantize(): {weight_dequant.shape}")
+                        x = F.embedding(ids, weight_dequant)
+                        print(f"   └─ Dequantized embedding result: {x.shape}")
+                    else:
+                        # Method 2: Try accessing .data directly
+                        weight_data = weight.data
+                        print(f"   └─ Using .data: {weight_data.shape}")
+                        x = F.embedding(ids, weight_data)
+                        print(f"   └─ Data embedding result: {x.shape}")
+                        
+                except Exception as e:
+                    print(f"   └─ Dequantization failed: {e}")
+                    # Method 3: Convert to float and force correct shape
+                    print(f"   └─ Falling back to float conversion")
+                    weight_float = weight.float()
+                    
+                    # If still wrong dimensions, force transpose
+                    if weight_float.shape == torch.Size([4096, 256384]):
+                        print(f"   └─ Float tensor still wrong shape, transposing")
+                        weight_float = weight_float.T
+                    
+                    x = F.embedding(ids, weight_float)
+                    print(f"   └─ Float embedding result: {x.shape}")
                     
             else:
                 # Regular tensor - should work normally but verify
