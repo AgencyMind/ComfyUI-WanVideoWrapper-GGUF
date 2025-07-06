@@ -1902,19 +1902,22 @@ class LoadWanVideoT5TextEncoderGGUF:
                 print(f"Raw vocab_size: {raw_shape[0]}, embedding_dim: {raw_shape[1]}")
                 if raw_shape[0] == 256384 and raw_shape[1] == 4096:
                     print("✅ Correct WanVideo UMT5-XXL dimensions detected")
+                elif raw_shape[0] == 4096 and raw_shape[1] == 256384:
+                    print("✅ Valid UMT5-XXL GGUF model detected - requires transposition")
+                    print(f"   GGUF format: [{raw_shape[0]}, {raw_shape[1]}] will be transposed to [256384, 4096]")
                 elif raw_shape[0] == 3360:
                     error_msg = (f"❌ INCOMPATIBLE GGUF MODEL: {model_name}\n"
                                f"This model has vocab_size={raw_shape[0]} which is incompatible with WanVideo.\n"
                                f"WanVideo requires UMT5-XXL with vocab_size=256384 and embedding_dim=4096.\n"
                                f"Current model dimensions: [{raw_shape[0]}, {raw_shape[1]}]\n"
-                               f"Expected dimensions: [256384, 4096]\n"
+                               f"Expected dimensions: [256384, 4096] or [4096, 256384]\n"
                                f"Please use a WanVideo-compatible UMT5-XXL GGUF model (e.g., chatpig/umt5xxl-encoder-gguf).")
                     print(error_msg)
                     raise ValueError(error_msg)
                 else:
                     error_msg = (f"❌ UNKNOWN GGUF MODEL DIMENSIONS: {model_name}\n"
                                f"Model dimensions: [{raw_shape[0]}, {raw_shape[1]}]\n"
-                               f"WanVideo requires UMT5-XXL with dimensions: [256384, 4096]\n"
+                               f"WanVideo requires UMT5-XXL with dimensions: [256384, 4096] or [4096, 256384]\n"
                                f"Please verify this is a WanVideo-compatible UMT5-XXL GGUF model.")
                     print(error_msg)
                     raise ValueError(error_msg)
