@@ -1276,10 +1276,31 @@ class WanVideoModelLoaderGGUF:
         
         # Setup GGUF custom operations with quantization options
         try:
-            from comfy_extras.nodes_gguf import GGMLOps
-            custom_ops = GGMLOps()
+            # Try to import from ComfyUI-GGUF extension (city96)
+            import sys
+            import os
+            
+            # Look for ComfyUI-GGUF extension in custom_nodes
+            comfyui_gguf_path = None
+            custom_nodes_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "ComfyUI-GGUF")
+            if os.path.exists(custom_nodes_dir):
+                comfyui_gguf_path = custom_nodes_dir
+            else:
+                # Alternative path checking
+                custom_nodes_root = os.path.join(os.path.dirname(__file__), "..", "..", "ComfyUI-GGUF")
+                if os.path.exists(custom_nodes_root):
+                    comfyui_gguf_path = custom_nodes_root
+            
+            if comfyui_gguf_path:
+                sys.path.insert(0, comfyui_gguf_path)
+                from ops import GGMLOps
+                custom_ops = GGMLOps()
+            else:
+                raise ImportError("ComfyUI-GGUF extension not found")
+                
         except ImportError:
             # Fallback to standard ops if GGUF not available
+            print("Warning: ComfyUI-GGUF extension not available. GGUF quantization disabled.")
             custom_ops = comfy.ops.disable_weight_init
         
         if hasattr(custom_ops, 'Linear'):
@@ -1461,18 +1482,23 @@ class WanVideoModelLoaderGGUF:
             transformer = WanModel(**TRANSFORMER_CONFIG)
         transformer.eval()
         
-        # Load GGUF weights into transformer using ComfyUI's native mechanism
+        # Load GGUF weights preserving quantization (MultiTalk pattern)
         params_to_keep = {"norm", "head", "bias", "time_in", "vector_in", "patch_embedding", "time_", "img_emb", "modulation", "text_embedding", "adapter", "add"}
         
         for name, param in transformer.named_parameters():
             if name in sd:
                 tensor_data = sd[name]
-                dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else base_dtype
-                if "patch_embedding" in name:
-                    dtype_to_use = torch.float32
                 
-                # Use ComfyUI's native tensor loading - no manual reshaping needed
-                set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=tensor_data)
+                # Critical: preserve quantization for quantized tensors (MultiTalk pattern)
+                if hasattr(tensor_data, 'tensor_type'):
+                    # Quantized tensor - preserve quantization (no dtype conversion)
+                    set_module_tensor_to_device(transformer, name, device=transformer_load_device, value=tensor_data)
+                else:
+                    # Regular tensor - apply dtype conversion
+                    dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else base_dtype
+                    if "patch_embedding" in name:
+                        dtype_to_use = torch.float32
+                    set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=tensor_data)
             else:
                 print(f"Warning: parameter '{name}' not found in state dict")
         
@@ -1486,14 +1512,8 @@ class WanVideoModelLoaderGGUF:
         comfy_model.diffusion_model = transformer
         comfy_model.load_device = transformer_load_device
         
-        # Create GGUF model patcher
-        try:
-            from .ComfyUI_GGUF.nodes import GGUFModelPatcher
-            patcher = GGUFModelPatcher(comfy_model, device, offload_device)
-        except ImportError:
-            # Fallback to standard model patcher if GGUF extension not found
-            print("GGUF extension not found, using standard ModelPatcher")
-            patcher = comfy.model_patcher.ModelPatcher(comfy_model, device, offload_device)
+        # Create model patcher (standard ComfyUI ModelPatcher works with quantized models)
+        patcher = comfy.model_patcher.ModelPatcher(comfy_model, device, offload_device)
         patcher.model.is_patched = False
         patcher.patch_on_device = patch_on_device
 
