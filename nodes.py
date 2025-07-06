@@ -2031,8 +2031,23 @@ class LoadWanVideoT5TextEncoderGGUF:
 
         # Fix tensor shapes for GGUF models - handle transposition issues  
         if model_path.endswith(".gguf"):
+            print("=== GGUF T5 Tensor Shape Debugging ===")
             print("Checking and fixing tensor shapes for GGUF T5 model...")
+            
+            # Debug: Show key tensors and their properties
+            key_tensors = ["token_embedding.weight", "norm.weight", "blocks.0.attn.q.weight", "blocks.0.ffn.gate.0.weight"]
+            for debug_key in key_tensors:
+                if debug_key in sd:
+                    tensor = sd[debug_key]
+                    is_quantized = hasattr(tensor, 'tensor_type')
+                    print(f"DEBUG - {debug_key}: shape={tensor.shape}, quantized={is_quantized}")
+                    if is_quantized:
+                        print(f"  └─ tensor_type={tensor.tensor_type}")
+            
             fixed_sd = {}
+            transpose_count = 0
+            skip_count = 0
+            
             for key, tensor in sd.items():
                 # Apply intelligent transposition based on T5 architecture expectations
                 # UMT5-XXL: dim=4096, dim_ffn=10240
@@ -2044,21 +2059,38 @@ class LoadWanVideoT5TextEncoderGGUF:
                 # GGUF storage vs T5 expectations require selective transposition
                 
                 needs_transpose = False
+                transpose_reason = ""
+                
                 if "token_embedding.weight" in key and tensor.shape == (4096, 256384):
-                    needs_transpose = True  # Model expects [256384, 4096] but GGUF has [4096, 256384]
+                    # Only transpose if not quantized - quantized transposition may break runtime
+                    if not hasattr(tensor, 'tensor_type'):
+                        needs_transpose = True
+                        transpose_reason = "Model expects [256384, 4096] but GGUF has [4096, 256384]"
+                    else:
+                        print(f"DECISION: Skipping transposition of quantized token_embedding.weight to avoid runtime issues")
+                        print(f"  └─ This means shape mismatch will occur during loading")
+                        skip_count += 1
                 elif "ffn.gate.0.weight" in key and tensor.shape == (4096, 10240):
-                    needs_transpose = True  # Should be [10240, 4096] (Linear(4096, 10240))
+                    needs_transpose = True
+                    transpose_reason = "FFN gate layer: GGUF [4096, 10240] → Expected [10240, 4096] (Linear(4096, 10240))"
                 elif "ffn.fc1.weight" in key and tensor.shape == (4096, 10240):
-                    needs_transpose = True  # Should be [10240, 4096] (Linear(4096, 10240))
+                    needs_transpose = True
+                    transpose_reason = "FFN fc1 layer: GGUF [4096, 10240] → Expected [10240, 4096] (Linear(4096, 10240))"
                 elif "ffn.fc2.weight" in key and tensor.shape == (10240, 4096):
-                    needs_transpose = True  # Should be [4096, 10240] (Linear(10240, 4096))
+                    needs_transpose = True
+                    transpose_reason = "FFN fc2 layer: GGUF [10240, 4096] → Expected [4096, 10240] (Linear(10240, 4096))"
                 elif "pos_embedding.embedding.weight" in key and tensor.shape == (64, 32):
-                    needs_transpose = True  # Should be [32, 64] (T5RelativeEmbedding)
+                    needs_transpose = True
+                    transpose_reason = "Position embedding: GGUF [64, 32] → Expected [32, 64] (T5RelativeEmbedding)"
                 # NOTE: ffn.fc2 expects OPPOSITE shape from gate/fc1 due to different Linear layer dimensions!
                 
                 if needs_transpose:
+                    transpose_count += 1
                     if hasattr(tensor, 'tensor_type'):
-                        print(f"Transposing quantized tensor {key}: {tensor.shape} -> {tensor.shape[::-1]}")
+                        print(f"TRANSPOSE #{transpose_count}: Quantized {key}")
+                        print(f"  └─ Reason: {transpose_reason}")
+                        print(f"  └─ Shape: {tensor.shape} -> {tensor.shape[::-1]}")
+                        print(f"  └─ Quantization: {tensor.tensor_type}")
                         try:
                             # Create new GGMLTensor with transposed data
                             transposed_data = tensor.data.T.contiguous()
@@ -2068,25 +2100,46 @@ class LoadWanVideoT5TextEncoderGGUF:
                                 tensor_shape=torch.Size(tensor.shape[::-1])
                             )
                             fixed_sd[key] = transposed_tensor
+                            print(f"  └─ SUCCESS: Quantized transpose completed")
                         except Exception as e:
-                            print(f"Warning: Could not transpose quantized tensor {key}, using as-is: {e}")
+                            print(f"  └─ FAILED: Could not transpose quantized tensor: {e}")
                             fixed_sd[key] = tensor
                     else:
-                        print(f"Transposing tensor {key}: {tensor.shape} -> {tensor.shape[::-1]}")
+                        print(f"TRANSPOSE #{transpose_count}: Regular {key}")
+                        print(f"  └─ Reason: {transpose_reason}")
+                        print(f"  └─ Shape: {tensor.shape} -> {tensor.shape[::-1]}")
                         fixed_sd[key] = tensor.T.contiguous()
+                        print(f"  └─ SUCCESS: Regular transpose completed")
                 else:
                     fixed_sd[key] = tensor
+            
+            print(f"=== GGUF Transpose Summary ===")
+            print(f"Tensors transposed: {transpose_count}")
+            print(f"Tensors skipped: {skip_count}")
+            print(f"Total tensors processed: {len(sd)}")
+            
             sd = fixed_sd
 
         # Initialize T5 text encoder with shape-corrected state dict
-        T5_text_encoder = T5EncoderModel(
-            text_len=512,
-            dtype=dtype,
-            device=text_encoder_load_device,
-            state_dict=sd,
-            tokenizer_path=tokenizer_path,
-            quantization=quantization
-        )
+        print("=== Attempting T5 Model Creation ===")
+        try:
+            T5_text_encoder = T5EncoderModel(
+                text_len=512,
+                dtype=dtype,
+                device=text_encoder_load_device,
+                state_dict=sd,
+                tokenizer_path=tokenizer_path,
+                quantization=quantization
+            )
+            print("✅ SUCCESS: T5 model created and loaded successfully!")
+            print(f"   ├─ Device: {text_encoder_load_device}")
+            print(f"   ├─ Dtype: {dtype}")
+            print(f"   ├─ Quantization: {quantization}")
+            print(f"   └─ Model type: {type(T5_text_encoder)}")
+        except Exception as e:
+            print(f"❌ FAILED: T5 model creation failed")
+            print(f"   └─ Error: {e}")
+            raise
         
         text_encoder = {
             "model": T5_text_encoder,

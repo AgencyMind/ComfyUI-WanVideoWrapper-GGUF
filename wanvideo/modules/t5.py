@@ -65,7 +65,24 @@ class T5LayerNorm(nn.Module):
                             self.eps)
         if self.weight.dtype in [torch.float16, torch.bfloat16]:
             x = x.type_as(self.weight)
-        return self.weight * x
+        
+        # Debug: Add runtime shape checking for GGUF debugging
+        try:
+            result = self.weight * x
+            return result
+        except RuntimeError as e:
+            print(f"=== T5LayerNorm Runtime Error Debug ===")
+            print(f"Error: {e}")
+            print(f"self.weight shape: {self.weight.shape}")
+            print(f"x shape: {x.shape}")
+            print(f"x dtype: {x.dtype}")
+            print(f"self.weight dtype: {self.weight.dtype}")
+            if hasattr(self.weight, 'tensor_type'):
+                print(f"self.weight is quantized: {self.weight.tensor_type}")
+            else:
+                print(f"self.weight is not quantized")
+            print(f"Operation attempted: {self.weight.shape} * {x.shape}")
+            raise
 
 
 class T5Attention(nn.Module):
