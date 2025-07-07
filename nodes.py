@@ -41,37 +41,44 @@ try:
     import warnings
     import comfy.ops
     
-    # Try to import ComfyUI-GGUF if available
+    # Try to import ComfyUI-GGUF if available - use proper ComfyUI custom node import pattern
     try:
-        # Import ComfyUI-GGUF components if the extension is installed
-        import custom_nodes.ComfyUI_GGUF.loader as gguf_loader
-        import custom_nodes.ComfyUI_GGUF.ops as gguf_ops
-        gguf_clip_loader = gguf_loader.gguf_clip_loader
-        GGMLTensor = gguf_ops.GGMLTensor
+        # Method 1: Direct import from ComfyUI-GGUF custom node (ComfyUI-GGUF with dash)
+        import sys
+        import os
+        comfy_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        gguf_path = os.path.join(comfy_dir, 'custom_nodes', 'ComfyUI-GGUF')
+        if gguf_path not in sys.path:
+            sys.path.insert(0, gguf_path)
+        from loader import gguf_clip_loader
+        from ops import GGMLTensor
         COMFYUI_GGUF_AVAILABLE = True
         print("✅ Using ComfyUI-GGUF for proper quantization handling")
     except ImportError as e1:
-        # Fallback: try alternative import path
+        # Method 2: Try underscore version (ComfyUI_GGUF)
         try:
-            import ComfyUI_GGUF.loader as gguf_loader
-            import ComfyUI_GGUF.ops as gguf_ops
-            gguf_clip_loader = gguf_loader.gguf_clip_loader
-            GGMLTensor = gguf_ops.GGMLTensor
+            gguf_path_underscore = os.path.join(comfy_dir, 'custom_nodes', 'ComfyUI_GGUF')
+            if gguf_path_underscore not in sys.path:
+                sys.path.insert(0, gguf_path_underscore)
+            from loader import gguf_clip_loader
+            from ops import GGMLTensor
             COMFYUI_GGUF_AVAILABLE = True
-            print("✅ Using ComfyUI-GGUF for proper quantization handling (alternative path)")
+            print("✅ Using ComfyUI-GGUF for proper quantization handling (underscore)")
         except ImportError as e2:
-            # Try direct import without custom_nodes prefix
+            # Method 3: Try standard Python import
             try:
-                import sys
-                sys.path.append("../ComfyUI-GGUF")
-                from loader import gguf_clip_loader
-                from ops import GGMLTensor
+                # Standard Python import if installed as package
+                from ComfyUI_GGUF.loader import gguf_clip_loader
+                from ComfyUI_GGUF.ops import GGMLTensor
                 COMFYUI_GGUF_AVAILABLE = True
-                print("✅ Using ComfyUI-GGUF for proper quantization handling (direct import)")
+                print("✅ Using ComfyUI-GGUF for proper quantization handling (package)")
             except ImportError as e3:
                 COMFYUI_GGUF_AVAILABLE = False
                 print(f"⚠️  ComfyUI-GGUF not found - using fallback GGUF loading")
-                print(f"   Import attempts failed: {e1}, {e2}, {e3}")
+                print(f"   Import attempts failed:")
+                print(f"   - Method 1 (dash): {e1}")
+                print(f"   - Method 2 (underscore): {e2}")  
+                print(f"   - Method 3 (package): {e3}")
     
     GGUF_AVAILABLE = True
 except ImportError:
