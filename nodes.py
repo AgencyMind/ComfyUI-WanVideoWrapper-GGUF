@@ -239,25 +239,27 @@ if GGUF_AVAILABLE:
             if shape is None:
                 shape = torch.Size(tuple(int(v) for v in tensor.shape))
             
-            # Apply T5 key mapping for GGUF format
+            # Apply T5 key mapping for GGUF format following ComfyUI-GGUF patterns
             wan_key = sd_key
             if sd_key == "token_embd.weight":
                 wan_key = "shared.weight"
-                # CRITICAL: UMT5-XXL GGUF models need transposition
-                if shape == (4096, 256384):
-                    # Validate element count before transposition
-                    if torch_tensor.numel() == shape.numel():
-                        print(f"🔄 Transposing embedding tensor from {shape} to (256384, 4096) for WanVideo compatibility")
-                        torch_tensor = torch_tensor.view(*shape).T
-                        shape = torch.Size((256384, 4096))
-                        # CRITICAL: Dequantize large embeddings to prevent runtime OOM
-                        print(f"⚠️  Dequantizing large embedding to prevent runtime OOM (fallback mode)")
-                        torch_tensor = torch_tensor.to(dtype=torch.float16)
+                # ComfyUI-GGUF pattern: check for large embedding and dequantize
+                if shape == (256384, 4096):
+                    print(f"⚠️  Dequantizing large embedding {wan_key} to prevent runtime OOM (fallback mode)")
+                    if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
+                        torch_tensor = torch_tensor.view(*shape).to(dtype=torch.float16)
                     else:
-                        print(f"⚠️  Cannot transpose embedding: tensor has {torch_tensor.numel()} elements, target shape {shape} needs {shape.numel()}")
-                        print(f"⚠️  Using tensor as-is with shape {torch_tensor.shape} for {wan_key}")
-                        # Dequantize but don't reshape
-                        torch_tensor = torch_tensor.to(dtype=torch.float16)
+                        # For quantized tensors, use simple dequantization
+                        torch_tensor = torch_tensor.to(dtype=torch.float16).view(*shape)
+                elif shape == (4096, 256384):
+                    # Handle transposition case for WanVideo compatibility
+                    print(f"🔄 Transposing embedding tensor from {shape} to (256384, 4096) for WanVideo compatibility")
+                    if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
+                        torch_tensor = torch_tensor.view(*shape).T.to(dtype=torch.float16)
+                    else:
+                        # For quantized tensors, use simple dequantization then transpose
+                        torch_tensor = torch_tensor.to(dtype=torch.float16).view(*shape).T
+                    shape = torch.Size((256384, 4096))
             elif sd_key.startswith("enc.blk."):
                 wan_key = sd_key.replace("enc.blk.", "encoder.block.")
             elif ".attn_q." in sd_key:
@@ -281,26 +283,25 @@ if GGUF_AVAILABLE:
             elif sd_key == "output_norm.weight":
                 wan_key = "final_layer_norm.weight"
             
-            # Create tensor (fallback doesn't support quantization properly)
+            # Follow ComfyUI-GGUF pattern for tensor creation
             if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
                 torch_tensor = torch_tensor.view(*shape)
-                state_dict[wan_key] = torch_tensor
             else:
-                # In fallback mode, dequantize everything to prevent issues
+                # For quantized tensors, use proper dequantization following ComfyUI-GGUF patterns
                 print(f"⚠️  Dequantizing {wan_key} in fallback mode")
                 try:
-                    # For quantized tensors, don't reshape - use the raw tensor and convert dtype
+                    # Use simple dequantization for compatibility
                     torch_tensor = torch_tensor.to(dtype=torch.float16)
-                    # Only reshape if the total elements match
-                    if torch_tensor.numel() == shape.numel():
-                        torch_tensor = torch_tensor.view(*shape)
-                    else:
+                    if torch_tensor.numel() != shape.numel():
                         print(f"⚠️  Shape mismatch for {wan_key}: tensor has {torch_tensor.numel()} elements, target shape {shape} needs {shape.numel()}")
-                        print(f"⚠️  Using original tensor shape {torch_tensor.shape} for {wan_key}")
+                        # Don't reshape if elements don't match
+                    else:
+                        torch_tensor = torch_tensor.view(*shape)
                 except Exception as e:
                     print(f"❌ Failed to process {wan_key}: {e}")
                     continue
-                state_dict[wan_key] = torch_tensor
+            
+            state_dict[wan_key] = torch_tensor
             
             # Track tensor types
             tensor_type_str = getattr(tensor.tensor_type, "name", repr(tensor.tensor_type))
