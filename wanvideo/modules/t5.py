@@ -320,85 +320,24 @@ class T5Encoder(nn.Module):
         self.apply(init_weights)
 
     def forward(self, ids, mask=None):
-        # Debug: Check embedding behavior for GGUF debugging
-        print(f"🔍 T5Encoder.forward() debugging:")
-        print(f"   └─ Input ids shape: {ids.shape}")
-        print(f"   └─ token_embedding.weight shape: {self.token_embedding.weight.shape}")
+        # Handle quantized embedding lookup properly
         if hasattr(self.token_embedding.weight, 'tensor_type'):
-            print(f"   └─ token_embedding is quantized: {self.token_embedding.weight.tensor_type}")
+            # For quantized tensors, use F.embedding with dequantized weights
+            import torch.nn.functional as F
+            try:
+                if hasattr(self.token_embedding.weight, 'dequantize'):
+                    weight_dequant = self.token_embedding.weight.dequantize()
+                    x = F.embedding(ids, weight_dequant)
+                else:
+                    # Fallback to direct tensor data
+                    x = F.embedding(ids, self.token_embedding.weight.data)
+            except Exception as e:
+                print(f"Quantized embedding lookup failed: {e}")
+                # Final fallback - convert to float
+                x = F.embedding(ids, self.token_embedding.weight.float())
         else:
-            print(f"   └─ token_embedding is not quantized")
-        
-        x = self.token_embedding(ids)
-        print(f"   └─ Embedding output shape: {x.shape}")
-        print(f"   └─ Expected output shape: [batch_size, seq_len, 4096]")
-        
-        # Verify dimensional correctness
-        if x.shape[-1] != 4096:
-            print(f"❌ DIMENSIONAL ERROR: Embedding output has {x.shape[-1]} dimensions, expected 4096")
-            print(f"   Root cause: Quantized tensor embedding lookup is using wrong axis")
-            print(f"   Solution: Manual embedding lookup with proper tensor handling")
-            
-            # CRITICAL FIX: Manual embedding lookup for quantized tensors
-            if hasattr(self.token_embedding.weight, 'tensor_type'):
-                print(f"🔧 APPLYING QUANTIZED EMBEDDING FIX")
-                
-                # Get the quantized weight tensor
-                weight = self.token_embedding.weight
-                print(f"   └─ Weight shape: {weight.shape}")
-                print(f"   └─ Weight quantization: {weight.tensor_type}")
-                
-                # Manual embedding lookup using F.embedding with proper indexing
-                import torch.nn.functional as F
-                
-                # CRITICAL: Quantized tensors need dequantization for proper embedding lookup
-                print(f"   └─ Attempting dequantization for proper embedding lookup")
-                
-                try:
-                    # Method 1: Try .dequantize() if available
-                    if hasattr(weight, 'dequantize'):
-                        weight_dequant = weight.dequantize()
-                        print(f"   └─ Dequantized using .dequantize(): {weight_dequant.shape}")
-                        x = F.embedding(ids, weight_dequant)
-                        print(f"   └─ Dequantized embedding result: {x.shape}")
-                    else:
-                        # Method 2: Try accessing .data directly
-                        weight_data = weight.data
-                        print(f"   └─ Using .data: {weight_data.shape}")
-                        x = F.embedding(ids, weight_data)
-                        print(f"   └─ Data embedding result: {x.shape}")
-                        
-                except Exception as e:
-                    print(f"   └─ Dequantization failed: {e}")
-                    # Method 3: Convert to float and force correct shape
-                    print(f"   └─ Falling back to float conversion")
-                    weight_float = weight.float()
-                    
-                    # If still wrong dimensions, force transpose
-                    if weight_float.shape == torch.Size([4096, 256384]):
-                        print(f"   └─ Float tensor still wrong shape, transposing")
-                        weight_float = weight_float.T
-                    
-                    x = F.embedding(ids, weight_float)
-                    print(f"   └─ Float embedding result: {x.shape}")
-                    
-            else:
-                # Regular tensor - should work normally but verify
-                print(f"🔧 REGULAR TENSOR EMBEDDING CHECK")
-                weight = self.token_embedding.weight
-                if weight.shape == torch.Size([4096, 256384]):
-                    print(f"   └─ Regular tensor needs transpose")
-                    self.token_embedding.weight = nn.Parameter(weight.T.contiguous())
-                    x = self.token_embedding(ids)
-                    print(f"   └─ Fixed regular embedding result: {x.shape}")
-                    
-            # Verify fix worked
-            if x.shape[-1] == 4096:
-                print(f"✅ EMBEDDING FIX SUCCESSFUL: Output now {x.shape}")
-            else:
-                print(f"❌ EMBEDDING FIX FAILED: Still wrong dimensions {x.shape}")
-        else:
-            print(f"✅ Embedding output dimensions correct: {x.shape[-1]}")
+            # Regular tensor - use standard embedding
+            x = self.token_embedding(ids)
         
         x = self.dropout(x)
         e = self.pos_embedding(x.size(1),
