@@ -327,14 +327,23 @@ class T5Encoder(nn.Module):
             try:
                 if hasattr(self.token_embedding.weight, 'dequantize'):
                     weight_dequant = self.token_embedding.weight.dequantize()
+                    # Critical: Check if dequantized weight needs transpose
+                    if weight_dequant.shape == torch.Size([4096, 256384]):
+                        weight_dequant = weight_dequant.T
                     x = F.embedding(ids, weight_dequant)
                 else:
                     # Fallback to direct tensor data
-                    x = F.embedding(ids, self.token_embedding.weight.data)
+                    weight_data = self.token_embedding.weight.data
+                    if weight_data.shape == torch.Size([4096, 256384]):
+                        weight_data = weight_data.T
+                    x = F.embedding(ids, weight_data)
             except Exception as e:
                 print(f"Quantized embedding lookup failed: {e}")
                 # Final fallback - convert to float
-                x = F.embedding(ids, self.token_embedding.weight.float())
+                weight_float = self.token_embedding.weight.float()
+                if weight_float.shape == torch.Size([4096, 256384]):
+                    weight_float = weight_float.T
+                x = F.embedding(ids, weight_float)
         else:
             # Regular tensor - use standard embedding
             x = self.token_embedding(ids)
