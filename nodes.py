@@ -245,12 +245,19 @@ if GGUF_AVAILABLE:
                 wan_key = "shared.weight"
                 # CRITICAL: UMT5-XXL GGUF models need transposition
                 if shape == (4096, 256384):
-                    print(f"🔄 Transposing embedding tensor from {shape} to (256384, 4096) for WanVideo compatibility")
-                    torch_tensor = torch_tensor.view(*shape).T
-                    shape = torch.Size((256384, 4096))
-                    # CRITICAL: Dequantize large embeddings to prevent runtime OOM
-                    print(f"⚠️  Dequantizing large embedding to prevent runtime OOM (fallback mode)")
-                    torch_tensor = torch_tensor.to(dtype=torch.float16)
+                    # Validate element count before transposition
+                    if torch_tensor.numel() == shape.numel():
+                        print(f"🔄 Transposing embedding tensor from {shape} to (256384, 4096) for WanVideo compatibility")
+                        torch_tensor = torch_tensor.view(*shape).T
+                        shape = torch.Size((256384, 4096))
+                        # CRITICAL: Dequantize large embeddings to prevent runtime OOM
+                        print(f"⚠️  Dequantizing large embedding to prevent runtime OOM (fallback mode)")
+                        torch_tensor = torch_tensor.to(dtype=torch.float16)
+                    else:
+                        print(f"⚠️  Cannot transpose embedding: tensor has {torch_tensor.numel()} elements, target shape {shape} needs {shape.numel()}")
+                        print(f"⚠️  Using tensor as-is with shape {torch_tensor.shape} for {wan_key}")
+                        # Dequantize but don't reshape
+                        torch_tensor = torch_tensor.to(dtype=torch.float16)
             elif sd_key.startswith("enc.blk."):
                 wan_key = sd_key.replace("enc.blk.", "encoder.block.")
             elif ".attn_q." in sd_key:
