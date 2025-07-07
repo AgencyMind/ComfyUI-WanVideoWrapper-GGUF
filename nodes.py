@@ -50,7 +50,7 @@ try:
         GGMLTensor = gguf_ops.GGMLTensor
         COMFYUI_GGUF_AVAILABLE = True
         print("✅ Using ComfyUI-GGUF for proper quantization handling")
-    except ImportError:
+    except ImportError as e1:
         # Fallback: try alternative import path
         try:
             import ComfyUI_GGUF.loader as gguf_loader
@@ -59,9 +59,19 @@ try:
             GGMLTensor = gguf_ops.GGMLTensor
             COMFYUI_GGUF_AVAILABLE = True
             print("✅ Using ComfyUI-GGUF for proper quantization handling (alternative path)")
-        except ImportError:
-            COMFYUI_GGUF_AVAILABLE = False
-            print("⚠️  ComfyUI-GGUF not found - using fallback GGUF loading")
+        except ImportError as e2:
+            # Try direct import without custom_nodes prefix
+            try:
+                import sys
+                sys.path.append("../ComfyUI-GGUF")
+                from loader import gguf_clip_loader
+                from ops import GGMLTensor
+                COMFYUI_GGUF_AVAILABLE = True
+                print("✅ Using ComfyUI-GGUF for proper quantization handling (direct import)")
+            except ImportError as e3:
+                COMFYUI_GGUF_AVAILABLE = False
+                print(f"⚠️  ComfyUI-GGUF not found - using fallback GGUF loading")
+                print(f"   Import attempts failed: {e1}, {e2}, {e3}")
     
     GGUF_AVAILABLE = True
 except ImportError:
@@ -271,7 +281,18 @@ if GGUF_AVAILABLE:
             else:
                 # In fallback mode, dequantize everything to prevent issues
                 print(f"⚠️  Dequantizing {wan_key} in fallback mode")
-                torch_tensor = torch_tensor.view(*shape).to(dtype=torch.float16)
+                try:
+                    # For quantized tensors, don't reshape - use the raw tensor and convert dtype
+                    torch_tensor = torch_tensor.to(dtype=torch.float16)
+                    # Only reshape if the total elements match
+                    if torch_tensor.numel() == shape.numel():
+                        torch_tensor = torch_tensor.view(*shape)
+                    else:
+                        print(f"⚠️  Shape mismatch for {wan_key}: tensor has {torch_tensor.numel()} elements, target shape {shape} needs {shape.numel()}")
+                        print(f"⚠️  Using original tensor shape {torch_tensor.shape} for {wan_key}")
+                except Exception as e:
+                    print(f"❌ Failed to process {wan_key}: {e}")
+                    continue
                 state_dict[wan_key] = torch_tensor
             
             # Track tensor types
