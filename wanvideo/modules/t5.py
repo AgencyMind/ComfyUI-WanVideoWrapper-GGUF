@@ -320,33 +320,8 @@ class T5Encoder(nn.Module):
         self.apply(init_weights)
 
     def forward(self, ids, mask=None):
-        # Handle quantized embedding lookup properly
-        if hasattr(self.token_embedding.weight, 'tensor_type'):
-            # For quantized tensors, use F.embedding with dequantized weights
-            import torch.nn.functional as F
-            try:
-                if hasattr(self.token_embedding.weight, 'dequantize'):
-                    weight_dequant = self.token_embedding.weight.dequantize()
-                    # Critical: Check if dequantized weight needs transpose
-                    if weight_dequant.shape == torch.Size([4096, 256384]):
-                        weight_dequant = weight_dequant.T
-                    x = F.embedding(ids, weight_dequant)
-                else:
-                    # Fallback to direct tensor data
-                    weight_data = self.token_embedding.weight.data
-                    if weight_data.shape == torch.Size([4096, 256384]):
-                        weight_data = weight_data.T
-                    x = F.embedding(ids, weight_data)
-            except Exception as e:
-                print(f"Quantized embedding lookup failed: {e}")
-                # Final fallback - convert to float
-                weight_float = self.token_embedding.weight.float()
-                if weight_float.shape == torch.Size([4096, 256384]):
-                    weight_float = weight_float.T
-                x = F.embedding(ids, weight_float)
-        else:
-            # Regular tensor - use standard embedding
-            x = self.token_embedding(ids)
+        # Use standard embedding lookup - ComfyUI-GGUF handles quantization transparently
+        x = self.token_embedding(ids)
         
         x = self.dropout(x)
         e = self.pos_embedding(x.size(1),
@@ -544,13 +519,33 @@ class T5EncoderModel:
         else:
             cast_dtype = dtype
 
-        # Load state dict using standard method - ComfyUI-GGUF handles quantization properly
+        # Load state dict with GGUF-compatible handling
+        # ComfyUI-GGUF provides quantized tensors that need direct assignment
         params_to_keep = {'norm', 'pos_embedding', 'token_embedding'}
         for name, param in model.named_parameters():
             if name in state_dict:
                 tensor_data = state_dict[name]
-                dtype_to_use = dtype if any(keyword in name for keyword in params_to_keep) else cast_dtype
-                set_module_tensor_to_device(model, name, device=device, dtype=dtype_to_use, value=tensor_data)
+                
+                # For GGUF quantized tensors, use direct assignment to preserve quantization
+                if hasattr(tensor_data, 'tensor_type'):
+                    # This is a quantized tensor from ComfyUI-GGUF - assign directly
+                    try:
+                        # Navigate to the parameter and assign the quantized tensor
+                        module_path = name.split('.')
+                        target_module = model
+                        for path_part in module_path[:-1]:
+                            target_module = getattr(target_module, path_part)
+                        param_name = module_path[-1]
+                        target_module._parameters[param_name] = tensor_data
+                    except Exception as e:
+                        print(f"❌ Failed to assign quantized tensor {name}: {e}")
+                        # Fallback to standard assignment
+                        dtype_to_use = dtype if any(keyword in name for keyword in params_to_keep) else cast_dtype
+                        set_module_tensor_to_device(model, name, device=device, dtype=dtype_to_use, value=tensor_data)
+                else:
+                    # Regular tensor - use standard assignment
+                    dtype_to_use = dtype if any(keyword in name for keyword in params_to_keep) else cast_dtype
+                    set_module_tensor_to_device(model, name, device=device, dtype=dtype_to_use, value=tensor_data)
         del state_dict
         
         self.model = model
