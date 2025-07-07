@@ -41,44 +41,20 @@ try:
     import warnings
     import comfy.ops
     
-    # Try to import ComfyUI-GGUF if available - use proper ComfyUI custom node import pattern
+    # Try to import ComfyUI-GGUF using proper ComfyUI NODE_CLASS_MAPPINGS pattern
     try:
-        # Method 1: Direct import from ComfyUI-GGUF custom node (ComfyUI-GGUF with dash)
-        import sys
-        import os
-        comfy_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        gguf_path = os.path.join(comfy_dir, 'custom_nodes', 'ComfyUI-GGUF')
-        if gguf_path not in sys.path:
-            sys.path.insert(0, gguf_path)
-        from loader import gguf_clip_loader
-        from ops import GGMLTensor
-        COMFYUI_GGUF_AVAILABLE = True
-        print("✅ Using ComfyUI-GGUF for proper quantization handling")
-    except ImportError as e1:
-        # Method 2: Try underscore version (ComfyUI_GGUF)
-        try:
-            gguf_path_underscore = os.path.join(comfy_dir, 'custom_nodes', 'ComfyUI_GGUF')
-            if gguf_path_underscore not in sys.path:
-                sys.path.insert(0, gguf_path_underscore)
-            from loader import gguf_clip_loader
-            from ops import GGMLTensor
+        from nodes import NODE_CLASS_MAPPINGS
+        # Check if ComfyUI-GGUF is available in the global node mappings
+        if "CLIPLoaderGGUF" in NODE_CLASS_MAPPINGS:
+            gguf_clip_loader_class = NODE_CLASS_MAPPINGS["CLIPLoaderGGUF"]
             COMFYUI_GGUF_AVAILABLE = True
-            print("✅ Using ComfyUI-GGUF for proper quantization handling (underscore)")
-        except ImportError as e2:
-            # Method 3: Try standard Python import
-            try:
-                # Standard Python import if installed as package
-                from ComfyUI_GGUF.loader import gguf_clip_loader
-                from ComfyUI_GGUF.ops import GGMLTensor
-                COMFYUI_GGUF_AVAILABLE = True
-                print("✅ Using ComfyUI-GGUF for proper quantization handling (package)")
-            except ImportError as e3:
-                COMFYUI_GGUF_AVAILABLE = False
-                print(f"⚠️  ComfyUI-GGUF not found - using fallback GGUF loading")
-                print(f"   Import attempts failed:")
-                print(f"   - Method 1 (dash): {e1}")
-                print(f"   - Method 2 (underscore): {e2}")  
-                print(f"   - Method 3 (package): {e3}")
+            print("✅ Using ComfyUI-GGUF for proper quantization handling")
+        else:
+            raise ImportError("CLIPLoaderGGUF not found in NODE_CLASS_MAPPINGS")
+    except ImportError as e:
+        COMFYUI_GGUF_AVAILABLE = False
+        print(f"⚠️  ComfyUI-GGUF not found - using fallback GGUF loading")
+        print(f"   Error: {e}")
     
     GGUF_AVAILABLE = True
 except ImportError:
@@ -176,9 +152,26 @@ if GGUF_AVAILABLE:
         if COMFYUI_GGUF_AVAILABLE:
             print("🔄 Using ComfyUI-GGUF for optimal quantization handling")
             # Use ComfyUI-GGUF's proven loader which handles quantization properly
-            sd = gguf_clip_loader(path)
+            import os
+            clip_name = os.path.basename(path)
+            original_loader = gguf_clip_loader_class()
             
-            # ComfyUI-GGUF already maps T5 keys and handles large embedding dequantization
+            # Try to get raw state dict using load_data method
+            try:
+                sd = original_loader.load_data([path])
+                print(f"✅ ComfyUI-GGUF loaded raw state dict")
+            except Exception as e:
+                print(f"⚠️  Could not get raw state dict: {e}")
+                print("Trying load_clip method instead...")
+                # Fallback to load_clip method
+                clip_result = original_loader.load_clip(clip_name, "wan")
+                # Extract state dict from the CLIP object if possible
+                if hasattr(clip_result, 'get_sd'):
+                    sd = clip_result.get_sd()
+                else:
+                    print(f"⚠️  Could not extract state dict from CLIP object, falling back to manual loader")
+                    return gguf_wan_loader_fallback(path, handle_prefix, return_arch)
+            
             # Check if we have the expected T5 structure
             if "shared.weight" in sd:
                 print(f"✅ ComfyUI-GGUF loaded T5 model with proper key mapping")
@@ -190,7 +183,8 @@ if GGUF_AVAILABLE:
                     print(f"✅ Embedding properly dequantized by ComfyUI-GGUF")
             else:
                 print(f"Available keys: {list(sd.keys())[:10]}...")
-                raise ValueError("ComfyUI-GGUF loader did not produce expected T5 structure")
+                print(f"⚠️  Unexpected structure from ComfyUI-GGUF, falling back to manual loader")
+                return gguf_wan_loader_fallback(path, handle_prefix, return_arch)
             
             if return_arch:
                 return (sd, "t5encoder")  # ComfyUI-GGUF handles T5 architecture
