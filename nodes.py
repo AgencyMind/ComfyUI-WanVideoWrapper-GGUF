@@ -40,10 +40,27 @@ try:
     from comfy.sd import load_diffusion_model_state_dict
     import warnings
     import comfy.ops
+    
+    # Import ComfyUI-GGUF for proper quantization handling
+    import sys
+    
+    # Add ComfyUI-GGUF to path if available
+    comfyui_gguf_path = os.path.join(os.path.dirname(__file__), '..', 'ComfyUI-GGUF')
+    if os.path.exists(comfyui_gguf_path):
+        sys.path.insert(0, comfyui_gguf_path)
+        from loader import gguf_clip_loader
+        from ops import GGMLTensor
+        COMFYUI_GGUF_AVAILABLE = True
+        print("✅ Using ComfyUI-GGUF for proper quantization handling")
+    else:
+        COMFYUI_GGUF_AVAILABLE = False
+        print("⚠️  ComfyUI-GGUF not found - using fallback GGUF loading")
+    
     GGUF_AVAILABLE = True
 except ImportError:
     print("GGUF support not available. Install ComfyUI-GGUF extension for GGUF model support.")
     GGUF_AVAILABLE = False
+    COMFYUI_GGUF_AVAILABLE = False
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -71,58 +88,33 @@ if GGUF_AVAILABLE:
 
 # GGUF support classes and functions
 if GGUF_AVAILABLE:
-    class GGMLTensor(torch.Tensor):
-        """
-        Main tensor-like class for storing quantized weights
-        """
-        def __init__(self, *args, tensor_type, tensor_shape, patches=[], **kwargs):
-            super().__init__()
-            self.tensor_type = tensor_type
-            self.tensor_shape = tensor_shape
-            self.patches = patches
-            self.is_largest_weight = False
+    # Use ComfyUI-GGUF classes if available, otherwise define minimal fallbacks
+    if not COMFYUI_GGUF_AVAILABLE:
+        # Fallback implementations when ComfyUI-GGUF is not available
+        def get_field(reader, field_name, field_type):
+            field = reader.get_field(field_name)
+            if field is None:
+                return None
+            elif field_type == str:
+                if len(field.types) != 1 or field.types[0] != gguf.GGUFValueType.STRING:
+                    raise TypeError(f"Bad type for GGUF {field_name} key: expected string, got {field.types!r}")
+                return str(field.parts[field.data[-1]], encoding="utf-8")
+            elif field_type in [int, float, bool]:
+                return field_type(field.parts[field.data[-1]])
+            else:
+                raise TypeError(f"Unknown field type {field_type}")
 
-        def __new__(cls, *args, tensor_type, tensor_shape, patches=[], **kwargs):
-            return super().__new__(cls, *args, **kwargs)
+        def get_orig_shape(reader, tensor_name):
+            field_key = f"comfy.gguf.orig_shape.{tensor_name}"
+            field = reader.get_field(field_key)
+            if field is None:
+                return None
+            if len(field.types) != 2 or field.types[0] != gguf.GGUFValueType.ARRAY or field.types[1] != gguf.GGUFValueType.INT32:
+                raise TypeError(f"Bad original shape metadata for {field_key}: Expected ARRAY of INT32, got {field.types}")
+            return torch.Size(tuple(int(field.parts[part_idx][0]) for part_idx in field.data))
 
-        def to(self, *args, **kwargs):
-            new = super().to(*args, **kwargs)
-            new.tensor_type = getattr(self, "tensor_type", None)
-            new.tensor_shape = getattr(self, "tensor_shape", new.data.shape)
-            new.patches = getattr(self, "patches", []).copy()
-            new.is_largest_weight = getattr(self, "is_largest_weight", False)
-            return new
-
-        @property
-        def shape(self):
-            if not hasattr(self, "tensor_shape"):
-                self.tensor_shape = self.size()
-            return self.tensor_shape
-
-    def get_field(reader, field_name, field_type):
-        field = reader.get_field(field_name)
-        if field is None:
-            return None
-        elif field_type == str:
-            if len(field.types) != 1 or field.types[0] != gguf.GGUFValueType.STRING:
-                raise TypeError(f"Bad type for GGUF {field_name} key: expected string, got {field.types!r}")
-            return str(field.parts[field.data[-1]], encoding="utf-8")
-        elif field_type in [int, float, bool]:
-            return field_type(field.parts[field.data[-1]])
-        else:
-            raise TypeError(f"Unknown field type {field_type}")
-
-    def get_orig_shape(reader, tensor_name):
-        field_key = f"comfy.gguf.orig_shape.{tensor_name}"
-        field = reader.get_field(field_key)
-        if field is None:
-            return None
-        if len(field.types) != 2 or field.types[0] != gguf.GGUFValueType.ARRAY or field.types[1] != gguf.GGUFValueType.INT32:
-            raise TypeError(f"Bad original shape metadata for {field_key}: Expected ARRAY of INT32, got {field.types}")
-        return torch.Size(tuple(int(field.parts[part_idx][0]) for part_idx in field.data))
-
-    def is_quantized(tensor):
-        return tensor is not None and hasattr(tensor, "tensor_type") and tensor.tensor_type not in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}
+        def is_quantized(tensor):
+            return tensor is not None and hasattr(tensor, "tensor_type") and tensor.tensor_type not in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}
     
     def detect_wan_architecture(tensors):
         """
@@ -153,9 +145,40 @@ if GGUF_AVAILABLE:
             else:
                 return "t2v"  # Default fallback
     
-    def gguf_wan_loader(path, handle_prefix="model.diffusion_model.", return_arch=False):
+    def gguf_wan_loader(path, handle_prefix=None, return_arch=False):
         """
-        Load GGUF WanVideo model state dict with proper architecture detection
+        WanVideo-specific GGUF loader using ComfyUI-GGUF patterns for proper quantization handling
+        """
+        if COMFYUI_GGUF_AVAILABLE:
+            print("🔄 Using ComfyUI-GGUF for optimal quantization handling")
+            # Use ComfyUI-GGUF's proven loader which handles quantization properly
+            sd = gguf_clip_loader(path)
+            
+            # ComfyUI-GGUF already maps T5 keys and handles large embedding dequantization
+            # Check if we have the expected T5 structure
+            if "shared.weight" in sd:
+                print(f"✅ ComfyUI-GGUF loaded T5 model with proper key mapping")
+                print(f"Embedding shape: {sd['shared.weight'].shape}")
+                # ComfyUI-GGUF automatically dequantizes large embeddings to prevent OOM
+                if hasattr(sd['shared.weight'], 'tensor_type'):
+                    print(f"⚠️  Embedding still quantized, this may cause runtime issues")
+                else:
+                    print(f"✅ Embedding properly dequantized by ComfyUI-GGUF")
+            else:
+                print(f"Available keys: {list(sd.keys())[:10]}...")
+                raise ValueError("ComfyUI-GGUF loader did not produce expected T5 structure")
+            
+            if return_arch:
+                return (sd, "t5encoder")  # ComfyUI-GGUF handles T5 architecture
+            return sd
+        else:
+            # Fallback to manual loading if ComfyUI-GGUF not available
+            print("⚠️  Using fallback GGUF loading - quantization may not work properly")
+            return gguf_wan_loader_fallback(path, handle_prefix, return_arch)
+    
+    def gguf_wan_loader_fallback(path, handle_prefix="model.diffusion_model.", return_arch=False):
+        """
+        Fallback WanVideo GGUF loader for when ComfyUI-GGUF is not available
         """
         reader = gguf.GGUFReader(path)
         
@@ -184,7 +207,7 @@ if GGUF_AVAILABLE:
         elif not return_arch and arch_str not in ["t5encoder", None]:
             print(f"Note: Loading GGUF model with architecture '{arch_str}' as text encoder")
         
-        # Load state dict
+        # Load state dict with T5 key mapping
         state_dict = {}
         qtype_dict = {}
         
@@ -199,30 +222,60 @@ if GGUF_AVAILABLE:
             if shape is None:
                 shape = torch.Size(tuple(int(v) for v in tensor.shape))
             
-            # Create GGMLTensor for quantized weights
+            # Apply T5 key mapping for GGUF format
+            wan_key = sd_key
+            if sd_key == "token_embd.weight":
+                wan_key = "shared.weight"
+                # CRITICAL: UMT5-XXL GGUF models need transposition
+                if shape == (4096, 256384):
+                    print(f"🔄 Transposing embedding tensor from {shape} to (256384, 4096) for WanVideo compatibility")
+                    torch_tensor = torch_tensor.view(*shape).T
+                    shape = torch.Size((256384, 4096))
+                    # CRITICAL: Dequantize large embeddings to prevent runtime OOM
+                    print(f"⚠️  Dequantizing large embedding to prevent runtime OOM (fallback mode)")
+                    torch_tensor = torch_tensor.to(dtype=torch.float16)
+            elif sd_key.startswith("enc.blk."):
+                wan_key = sd_key.replace("enc.blk.", "encoder.block.")
+            elif ".attn_q." in sd_key:
+                wan_key = sd_key.replace(".attn_q.", ".layer.0.SelfAttention.q.")
+            elif ".attn_k." in sd_key:
+                wan_key = sd_key.replace(".attn_k.", ".layer.0.SelfAttention.k.")
+            elif ".attn_v." in sd_key:
+                wan_key = sd_key.replace(".attn_v.", ".layer.0.SelfAttention.v.")
+            elif ".attn_o." in sd_key:
+                wan_key = sd_key.replace(".attn_o.", ".layer.0.SelfAttention.o.")
+            elif ".attn_norm." in sd_key:
+                wan_key = sd_key.replace(".attn_norm.", ".layer.0.layer_norm.")
+            elif ".ffn_up." in sd_key:
+                wan_key = sd_key.replace(".ffn_up.", ".layer.1.DenseReluDense.wi_1.")
+            elif ".ffn_down." in sd_key:
+                wan_key = sd_key.replace(".ffn_down.", ".layer.1.DenseReluDense.wo.")
+            elif ".ffn_gate." in sd_key:
+                wan_key = sd_key.replace(".ffn_gate.", ".layer.1.DenseReluDense.wi_0.")
+            elif ".ffn_norm." in sd_key:
+                wan_key = sd_key.replace(".ffn_norm.", ".layer.1.layer_norm.")
+            elif sd_key == "output_norm.weight":
+                wan_key = "final_layer_norm.weight"
+            
+            # Create tensor (fallback doesn't support quantization properly)
             if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
                 torch_tensor = torch_tensor.view(*shape)
-                state_dict[sd_key] = torch_tensor
+                state_dict[wan_key] = torch_tensor
             else:
-                state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
+                # In fallback mode, dequantize everything to prevent issues
+                print(f"⚠️  Dequantizing {wan_key} in fallback mode")
+                torch_tensor = torch_tensor.view(*shape).to(dtype=torch.float16)
+                state_dict[wan_key] = torch_tensor
             
             # Track tensor types
             tensor_type_str = getattr(tensor.tensor_type, "name", repr(tensor.tensor_type))
             qtype_dict[tensor_type_str] = qtype_dict.get(tensor_type_str, 0) + 1
         
         # Log loaded tensor type counts
-        print(f"GGUF WanVideo model qtypes: {', '.join(f'{k} ({v})' for k, v in qtype_dict.items())}")
+        print(f"GGUF WanVideo model qtypes (fallback): {', '.join(f'{k} ({v})' for k, v in qtype_dict.items())}")
         
-        # Mark largest quantized tensor for VRAM estimation
-        qsd = {k: v for k, v in state_dict.items() if is_quantized(v)}
-        if len(qsd) > 0:
-            max_key = max(qsd.keys(), key=lambda k: qsd[k].numel())
-            state_dict[max_key].is_largest_weight = True
-        
-        # Detect WanVideo architecture only if requested
         if return_arch:
-            wan_arch = detect_wan_architecture(state_dict)
-            return (state_dict, wan_arch)
+            return (state_dict, "t5encoder")
         return state_dict
 
 def add_noise_to_reference_video(image, ratio=None):
