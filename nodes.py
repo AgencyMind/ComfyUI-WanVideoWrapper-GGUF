@@ -147,53 +147,46 @@ if GGUF_AVAILABLE:
     
     def gguf_wan_loader(path, handle_prefix=None, return_arch=False):
         """
-        WanVideo-specific GGUF loader using ComfyUI-GGUF patterns for proper quantization handling
+        WanVideo-specific GGUF loader using Kijai's proven diffusers pattern
         """
-        if COMFYUI_GGUF_AVAILABLE:
-            print("🔄 Using ComfyUI-GGUF for optimal quantization handling")
-            # Use ComfyUI-GGUF's proven loader which handles quantization properly
-            import os
-            clip_name = os.path.basename(path)
-            original_loader = gguf_clip_loader_class()
+        print("🔄 Using Kijai's proven diffusers GGUF pattern")
+        # Use diffusers' load_gguf_checkpoint - the same method Kijai uses for UNet models
+        from diffusers.models.model_loading_utils import load_gguf_checkpoint
+        
+        try:
+            sd = load_gguf_checkpoint(path)
+            print(f"✅ Diffusers loaded GGUF checkpoint successfully")
             
-            # Try to get raw state dict using load_data method
-            try:
-                clip_data_list = original_loader.load_data([path])
-                # load_data returns a list of state dicts, get the first one
-                if isinstance(clip_data_list, list) and len(clip_data_list) > 0:
-                    sd = clip_data_list[0]
-                    print(f"✅ ComfyUI-GGUF loaded raw state dict")
-                else:
-                    raise ValueError("load_data returned empty or invalid data")
-            except Exception as e:
-                print(f"⚠️  Could not get raw state dict: {e}")
-                print("Trying load_clip method instead...")
-                # Fallback to load_clip method
-                clip_result = original_loader.load_clip(clip_name, "wan")
-                # Extract state dict from the CLIP object if possible
-                if hasattr(clip_result, 'get_sd'):
-                    sd = clip_result.get_sd()
-                else:
-                    print(f"⚠️  Could not extract state dict from CLIP object, falling back to manual loader")
-                    return gguf_wan_loader_fallback(path, handle_prefix, return_arch)
+            # Check if we have the expected T5 structure 
+            embedding_key = None
+            for key in ["shared.weight", "token_embd.weight"]:
+                if key in sd:
+                    embedding_key = key
+                    break
             
-            # Check if we have the expected T5 structure
-            if "shared.weight" in sd:
-                print(f"✅ ComfyUI-GGUF loaded T5 model with proper key mapping")
-                print(f"Embedding shape: {sd['shared.weight'].shape}")
-                # ComfyUI-GGUF automatically dequantizes large embeddings to prevent OOM
-                if hasattr(sd['shared.weight'], 'tensor_type'):
-                    print(f"⚠️  Embedding still quantized, this may cause runtime issues")
+            if embedding_key:
+                print(f"✅ Found T5 embedding tensor: {embedding_key}")
+                print(f"Embedding shape: {sd[embedding_key].shape}")
+                print(f"Tensor type: {type(sd[embedding_key])}")
+                
+                # Verify the tensor is a proper GGUF quantized tensor
+                from diffusers.quantizers.gguf.utils import GGUFParameter
+                if isinstance(sd[embedding_key], GGUFParameter):
+                    print(f"✅ Confirmed quantized GGUF parameter")
                 else:
-                    print(f"✅ Embedding properly dequantized by ComfyUI-GGUF")
+                    print(f"⚠️  Not a quantized parameter - may be already dequantized")
             else:
                 print(f"Available keys: {list(sd.keys())[:10]}...")
-                print(f"⚠️  Unexpected structure from ComfyUI-GGUF, falling back to manual loader")
-                return gguf_wan_loader_fallback(path, handle_prefix, return_arch)
-            
+                raise ValueError(f"No T5 embedding tensor found in {path}")
+                
             if return_arch:
-                return (sd, "t5encoder")  # ComfyUI-GGUF handles T5 architecture
+                return (sd, "t5encoder")
             return sd
+            
+        except Exception as e:
+            print(f"❌ Diffusers GGUF loading failed: {e}")
+            print(f"⚠️  Falling back to manual loader")
+            return gguf_wan_loader_fallback(path, handle_prefix, return_arch)
         else:
             # Fallback to manual loading if ComfyUI-GGUF not available
             print("⚠️  Using fallback GGUF loading - quantization may not work properly")

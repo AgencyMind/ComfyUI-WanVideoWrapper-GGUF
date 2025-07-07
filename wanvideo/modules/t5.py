@@ -519,33 +519,32 @@ class T5EncoderModel:
         else:
             cast_dtype = dtype
 
-        # Load state dict with GGUF-compatible handling
-        # ComfyUI-GGUF provides quantized tensors that need direct assignment
-        params_to_keep = {'norm', 'pos_embedding', 'token_embedding'}
-        for name, param in model.named_parameters():
-            if name in state_dict:
-                tensor_data = state_dict[name]
-                
-                # For GGUF quantized tensors, use direct assignment to preserve quantization
-                if hasattr(tensor_data, 'tensor_type'):
-                    # This is a quantized tensor from ComfyUI-GGUF - assign directly
-                    try:
-                        # Navigate to the parameter and assign the quantized tensor
-                        module_path = name.split('.')
-                        target_module = model
-                        for path_part in module_path[:-1]:
-                            target_module = getattr(target_module, path_part)
-                        param_name = module_path[-1]
-                        target_module._parameters[param_name] = tensor_data
-                    except Exception as e:
-                        print(f"❌ Failed to assign quantized tensor {name}: {e}")
-                        # Fallback to standard assignment
-                        dtype_to_use = dtype if any(keyword in name for keyword in params_to_keep) else cast_dtype
-                        set_module_tensor_to_device(model, name, device=device, dtype=dtype_to_use, value=tensor_data)
-                else:
-                    # Regular tensor - use standard assignment
+        # Apply Kijai's GGUF loading pattern for quantized models
+        if quantization == "gguf":
+            # Use Kijai's proven GGUF architecture conversion
+            from ...gguf.gguf import _replace_with_gguf_linear
+            model = _replace_with_gguf_linear(model, dtype, state_dict, patches={})
+            
+            # Load parameters using Kijai's GGUF-compatible method
+            from diffusers.quantizers.gguf.utils import GGUFParameter
+            params_to_keep = {'norm', 'pos_embedding', 'token_embedding'}
+            
+            for name, param in model.named_parameters():
+                if name in state_dict:
+                    if isinstance(param, GGUFParameter):
+                        dtype_to_use = torch.uint8
+                    elif any(keyword in name for keyword in params_to_keep):
+                        dtype_to_use = dtype
+                    else:
+                        dtype_to_use = cast_dtype
+                    set_module_tensor_to_device(model, name, device=device, dtype=dtype_to_use, value=state_dict[name])
+        else:
+            # Standard loading for non-GGUF models
+            params_to_keep = {'norm', 'pos_embedding', 'token_embedding'}
+            for name, param in model.named_parameters():
+                if name in state_dict:
                     dtype_to_use = dtype if any(keyword in name for keyword in params_to_keep) else cast_dtype
-                    set_module_tensor_to_device(model, name, device=device, dtype=dtype_to_use, value=tensor_data)
+                    set_module_tensor_to_device(model, name, device=device, dtype=dtype_to_use, value=state_dict[name])
         del state_dict
         
         self.model = model
