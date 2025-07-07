@@ -544,106 +544,14 @@ class T5EncoderModel:
         else:
             cast_dtype = dtype
 
+        # Load state dict using standard method - ComfyUI-GGUF handles quantization properly
         params_to_keep = {'norm', 'pos_embedding', 'token_embedding'}
         for name, param in model.named_parameters():
             if name in state_dict:
                 tensor_data = state_dict[name]
-                
-                # Debug tensor shape mismatches (can be removed once stable)
-                if param.shape != tensor_data.shape:
-                    print(f"Shape mismatch for {name}: model expects {param.shape}, tensor has {tensor_data.shape}")
-                
-                # Critical: preserve quantization for quantized tensors (same pattern as WanVideo loader)
-                if hasattr(tensor_data, 'tensor_type'):
-                    # Quantized tensor - use direct assignment instead of set_module_tensor_to_device
-                    # which doesn't handle quantized tensors properly
-                    try:
-                        # Navigate to the actual parameter and assign directly
-                        module_path = name.split('.')
-                        target_module = model
-                        for path_part in module_path[:-1]:
-                            target_module = getattr(target_module, path_part)
-                        
-                        # Direct parameter assignment for quantized tensors
-                        param_name = module_path[-1]
-                        target_module._parameters[param_name] = tensor_data
-                        
-                        print(f"✅ Direct quantized assignment: {name}")
-                        
-                        # Verify assignment for token_embedding specifically
-                        if name == "token_embedding.weight":
-                            assigned_tensor = getattr(model.token_embedding, 'weight')
-                            print(f"🔍 Assignment verification for {name}:")
-                            print(f"   └─ Original tensor shape: {tensor_data.shape}")
-                            print(f"   └─ Assigned tensor shape: {assigned_tensor.shape}")
-                            print(f"   └─ Assignment successful: {assigned_tensor.shape == tensor_data.shape}")
-                    except Exception as e:
-                        print(f"❌ Direct assignment failed for {name}: {e}")
-                        # Fallback to original method
-                        set_module_tensor_to_device(model, name, device=device, value=tensor_data)
-                else:
-                    # Regular tensor - apply dtype conversion
-                    dtype_to_use = dtype if any(keyword in name for keyword in params_to_keep) else cast_dtype
-                    set_module_tensor_to_device(model, name, device=device, dtype=dtype_to_use, value=tensor_data)
+                dtype_to_use = dtype if any(keyword in name for keyword in params_to_keep) else cast_dtype
+                set_module_tensor_to_device(model, name, device=device, dtype=dtype_to_use, value=tensor_data)
         del state_dict
-        
-        # Adaptive validation: Detect actual model dimensions from loaded weights
-        token_emb_weight = model.token_embedding.weight
-        actual_shape = token_emb_weight.shape
-        actual_vocab_size, actual_embedding_dim = actual_shape
-        
-        # Debug: Print tensor properties for GGUF debugging
-        print(f"🔍 T5EncoderModel validation debug:")
-        print(f"   └─ token_embedding.weight.shape: {actual_shape}")
-        print(f"   └─ tensor dtype: {token_emb_weight.dtype}")
-        print(f"   └─ tensor device: {token_emb_weight.device}")
-        if hasattr(token_emb_weight, 'tensor_type'):
-            print(f"   └─ quantized: yes (type: {token_emb_weight.tensor_type})")
-        else:
-            print(f"   └─ quantized: no")
-        
-        # Critical check: Verify that assignment worked correctly
-        if hasattr(token_emb_weight, 'tensor_type') and actual_shape == torch.Size([256384, 4096]):
-            print(f"✅ GGUF quantized tensor assignment appears successful")
-        elif not hasattr(token_emb_weight, 'tensor_type') and actual_shape == torch.Size([256384, 4096]):
-            print(f"✅ Regular tensor assignment appears successful")
-        elif actual_shape == torch.Size([4096, 256384]):
-            print(f"❌ ASSIGNMENT FAILURE: Token embedding still has wrong shape after assignment")
-            print(f"   This indicates the direct parameter assignment didn't work")
-            print(f"   The embedding will produce {actual_shape[0]} dimensional outputs instead of {actual_shape[1]}")
-        else:
-            print(f"⚠️  Unknown tensor shape pattern: {actual_shape}")
-        
-        # Expected UMT5-XXL dimensions
-        expected_vocab_size, expected_embedding_dim = 256384, 4096
-        
-        if (actual_vocab_size, actual_embedding_dim) != (expected_vocab_size, expected_embedding_dim):
-            print(f"⚠️  Model dimension mismatch detected:")
-            print(f"Expected UMT5-XXL: vocab_size={expected_vocab_size}, embedding_dim={expected_embedding_dim}")
-            print(f"Actual model: vocab_size={actual_vocab_size}, embedding_dim={actual_embedding_dim}")
-            
-            # Check if this is a known T5 variant
-            if actual_vocab_size == 32128 and actual_embedding_dim == 768:
-                print(f"✅ Detected T5-Base model (32128 vocab, 768 dim)")
-            elif actual_vocab_size == 32128 and actual_embedding_dim == 1024:
-                print(f"✅ Detected T5-Large model (32128 vocab, 1024 dim)")
-            elif actual_vocab_size == 32128 and actual_embedding_dim == 2048:
-                print(f"✅ Detected T5-3B model (32128 vocab, 2048 dim)")
-            elif actual_vocab_size == 3360 and actual_embedding_dim == 256384:
-                print(f"❌ Invalid model detected: This appears to be a corrupted or incorrectly converted model")
-                print(f"   The dimensions suggest the vocab_size and embedding_dim were swapped during conversion")
-                raise RuntimeError(f"Invalid T5 model: vocab_size={actual_vocab_size}, embedding_dim={actual_embedding_dim}. "
-                                 f"This model appears to have swapped dimensions and is not compatible with WanVideo. "
-                                 f"Please use a proper UMT5-XXL GGUF model with 256384 vocab size and 4096 embedding dimension.")
-            else:
-                print(f"⚠️  Unknown T5 variant - proceeding with detected dimensions")
-                
-            # For non-UMT5-XXL models, update the architecture dynamically
-            if actual_vocab_size != expected_vocab_size or actual_embedding_dim != expected_embedding_dim:
-                print(f"🔄 Adapting T5EncoderModel for detected dimensions...")
-                # Note: This may cause compatibility issues with WanVideo which expects UMT5-XXL
-        else:
-            print(f"✅ Token embedding validation passed: UMT5-XXL dimensions {actual_shape}")
         
         self.model = model
         self.tokenizer = HuggingfaceTokenizer(
