@@ -41,20 +41,27 @@ try:
     import warnings
     import comfy.ops
     
-    # Import ComfyUI-GGUF for proper quantization handling
-    import sys
-    
-    # Add ComfyUI-GGUF to path if available
-    comfyui_gguf_path = os.path.join(os.path.dirname(__file__), '..', 'ComfyUI-GGUF')
-    if os.path.exists(comfyui_gguf_path):
-        sys.path.insert(0, comfyui_gguf_path)
-        from loader import gguf_clip_loader
-        from ops import GGMLTensor
+    # Try to import ComfyUI-GGUF if available
+    try:
+        # Import ComfyUI-GGUF components if the extension is installed
+        import custom_nodes.ComfyUI_GGUF.loader as gguf_loader
+        import custom_nodes.ComfyUI_GGUF.ops as gguf_ops
+        gguf_clip_loader = gguf_loader.gguf_clip_loader
+        GGMLTensor = gguf_ops.GGMLTensor
         COMFYUI_GGUF_AVAILABLE = True
         print("✅ Using ComfyUI-GGUF for proper quantization handling")
-    else:
-        COMFYUI_GGUF_AVAILABLE = False
-        print("⚠️  ComfyUI-GGUF not found - using fallback GGUF loading")
+    except ImportError:
+        # Fallback: try alternative import path
+        try:
+            import ComfyUI_GGUF.loader as gguf_loader
+            import ComfyUI_GGUF.ops as gguf_ops
+            gguf_clip_loader = gguf_loader.gguf_clip_loader
+            GGMLTensor = gguf_ops.GGMLTensor
+            COMFYUI_GGUF_AVAILABLE = True
+            print("✅ Using ComfyUI-GGUF for proper quantization handling (alternative path)")
+        except ImportError:
+            COMFYUI_GGUF_AVAILABLE = False
+            print("⚠️  ComfyUI-GGUF not found - using fallback GGUF loading")
     
     GGUF_AVAILABLE = True
 except ImportError:
