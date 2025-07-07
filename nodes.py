@@ -158,8 +158,13 @@ if GGUF_AVAILABLE:
             
             # Try to get raw state dict using load_data method
             try:
-                sd = original_loader.load_data([path])
-                print(f"✅ ComfyUI-GGUF loaded raw state dict")
+                clip_data_list = original_loader.load_data([path])
+                # load_data returns a list of state dicts, get the first one
+                if isinstance(clip_data_list, list) and len(clip_data_list) > 0:
+                    sd = clip_data_list[0]
+                    print(f"✅ ComfyUI-GGUF loaded raw state dict")
+                else:
+                    raise ValueError("load_data returned empty or invalid data")
             except Exception as e:
                 print(f"⚠️  Could not get raw state dict: {e}")
                 print("Trying load_clip method instead...")
