@@ -1991,9 +1991,11 @@ class LoadWanVideoT5TextEncoderGGUF:
             # CRITICAL: Verify raw GGUF model dimensions before any processing
             print(f"=== RAW GGUF MODEL VERIFICATION ===")
             print(f"Model file: {model_name}")
-            if "token_embd.weight" in sd:
-                raw_shape = sd["token_embd.weight"].shape
-                print(f"Raw token_embd.weight shape: {raw_shape}")
+            # ComfyUI-GGUF maps token_embd.weight to shared.weight
+            embedding_key = "shared.weight" if "shared.weight" in sd else "token_embd.weight"
+            if embedding_key in sd:
+                raw_shape = sd[embedding_key].shape
+                print(f"Raw {embedding_key} shape: {raw_shape}")
                 print(f"Raw vocab_size: {raw_shape[0]}, embedding_dim: {raw_shape[1]}")
                 if raw_shape[0] == 256384 and raw_shape[1] == 4096:
                     print("✅ Correct WanVideo UMT5-XXL dimensions detected")
@@ -2018,7 +2020,7 @@ class LoadWanVideoT5TextEncoderGGUF:
                     raise ValueError(error_msg)
             else:
                 error_msg = (f"❌ INVALID GGUF MODEL: {model_name}\n"
-                           f"Model does not contain 'token_embd.weight' tensor.\n"
+                           f"Model does not contain embedding tensor ('shared.weight' or 'token_embd.weight').\n"
                            f"Available keys: {list(sd.keys())[:10]}...\n"
                            f"Please use a valid UMT5-XXL GGUF model.")
                 print(error_msg)
