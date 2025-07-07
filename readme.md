@@ -2,6 +2,16 @@
 
 # WORK IN PROGRESS
 
+## ⚠️ PROVISIONAL FORK NOTICE
+
+This is a provisional fork of [Kijai's ComfyUI-WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) that extends GGUF support to fill gaps in T5 text encoder quantization. 
+
+**USE KIJAI'S OFFICIAL REPO INSTEAD**: https://github.com/kijai/ComfyUI-WanVideoWrapper
+
+This fork is **NOT actively maintained** and exists only to provide complementary T5 GGUF support until Kijai implements it officially. Once Kijai adds T5 text encoder GGUF support, this fork will become obsolete.
+
+**If you found this repo**, please use Kijai's official implementation instead for the most up-to-date and supported WanVideo integration.
+
 # Installation
 1. Clone this repo into `custom_nodes` folder.
 2. Install dependencies: `pip install -r requirements.txt`
